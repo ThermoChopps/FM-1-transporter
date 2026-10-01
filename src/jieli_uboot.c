@@ -20,6 +20,7 @@
 
 // ROM UBOOT1.00
 #define CMD_WRITE_MEMORY 0xFB06
+#define CMD_READ_MEMORY 0xFD07
 #define CMD_JUMP 0xFB08
 // LoaderV2
 #define CMD_ERASE_SECTOR 0xFB01
@@ -277,4 +278,58 @@ void jl_keepalive(void) {
     if (!loader_running || !fm1_host_uboot_ready()) return;
     if (time_us_64() - last_cmd_us < KEEPALIVE_MS * 1000ull) return;
     if (!cmd_exec(CMD_GET_ONLINE_DEVICE, NULL, 0)) dlog("JL: keepalive failed");
+}
+
+//--------------------------------------------------------------------+
+// RAM-run (ROM UBOOT1.00 stage only; requested by fm-1-research-lab)
+//--------------------------------------------------------------------+
+// WL82 UBOOT1.00 runs every memory write/read through jl_crc_cipher, per
+// transfer. These refuse to run once the loader is up: it lives at
+// LOADER_ADDR, the same address RAM-run images use, and would be clobbered.
+
+bool jl_loader_running(void) {
+    return loader_running;
+}
+
+bool jl_rom_mem_write(uint32_t addr, const uint8_t *data, uint16_t len) {
+    if (loader_running || !len || len > JL_IO_SIZE) return false;
+    memcpy(block, data, len);
+    jl_crc_cipher(block, len);
+    uint8_t args[9];
+    put_be32(args, addr);
+    args[4] = (uint8_t)(len >> 8);
+    args[5] = (uint8_t)len;
+    args[6] = 0x00;
+    uint16_t crc = jl_crc16(block, len, 0);
+    args[7] = (uint8_t)crc;          // LE
+    args[8] = (uint8_t)(crc >> 8);
+    uint8_t cdb[16];
+    make_cdb(cdb, CMD_WRITE_MEMORY, args, sizeof(args));
+    last_cmd_us = time_us_64();
+    return fm1_host_bot(cdb, 16, false, block, len, NULL);
+}
+
+bool jl_rom_mem_read(uint32_t addr, uint16_t len, uint8_t *out) {
+    if (loader_running || !len || len > JL_IO_SIZE) return false;
+    uint8_t args[6];
+    put_be32(args, addr);
+    args[4] = (uint8_t)(len >> 8);
+    args[5] = (uint8_t)len;
+    uint8_t cdb[16];
+    make_cdb(cdb, CMD_READ_MEMORY, args, sizeof(args));
+    uint32_t got = 0;
+    last_cmd_us = time_us_64();
+    if (!fm1_host_bot(cdb, 16, true, block, len, &got) || got != len) return false;
+    jl_crc_cipher(block, len);
+    memcpy(out, block, len);
+    return true;
+}
+
+bool jl_rom_jump(uint32_t addr, uint16_t arg) {
+    if (loader_running) return false;
+    uint8_t args[6];
+    put_be32(args, addr);
+    args[4] = (uint8_t)(arg >> 8);
+    args[5] = (uint8_t)arg;
+    return cmd_exec(CMD_JUMP, args, sizeof(args));
 }

@@ -9,6 +9,7 @@
     fm1t.py dump out.bin [--addr 0] [--len 0x100000] [--compare ref.bin]
     fm1t.py write --package FM-1_vNN.fwsc --ref earlier-dump.bin [--write]
     fm1t.py selftest-write --ref earlier-dump.bin --sector 0x92000 [--write]
+    fm1t.py ramrun IMAGE.bin [--addr 0x1C02000] [--clear A:N] [--poke A:V] [--read A:N]
 
 `write` follows fm-1-research-lab's restore policy, and is a dry run unless
 --write is given:
@@ -326,6 +327,66 @@ def cmd_selftest_write(s, args):
         sys.exit("fm1t: final read DIFFERS in sectors " + " ".join(f"{x:#07x}" for x in bad))
 
 
+def span(text):
+    a, _, b = text.partition(":")
+    return int(a, 0), int(b, 0)
+
+
+def mem_write(s, addr, data):
+    for off in range(0, len(data), 4096):
+        chunk = data[off:off + 4096]
+        s.reset_input_buffer()
+        s.write(f"memw {addr + off:#x} {len(chunk)} {zlib.crc32(chunk) & 0xFFFFFFFF:08X}\n".encode()
+                + chunk)
+        s.timeout = 20
+        reply = s.readline().decode(errors="replace").strip()
+        if reply != "OK":
+            sys.exit(f"fm1t: memw {addr + off:#x}: {reply or 'no reply'}")
+
+
+def mem_read(s, addr, length):
+    out = bytearray()
+    for off in range(0, length, 4096):
+        n = min(4096, length - off)
+        reply = request(s, f"memr {addr + off:#x} {n}", timeout=20)
+        if reply != f"DATA {n}":
+            sys.exit(f"fm1t: memr {addr + off:#x}: {reply}")
+        s.timeout = 10
+        data = s.read(n)
+        end = s.readline().decode(errors="replace").strip()
+        if len(data) != n or end != f"END {zlib.crc32(data) & 0xFFFFFFFF:08X}":
+            sys.exit(f"fm1t: memr {addr + off:#x}: transfer check failed ({end})")
+        out += data
+    return bytes(out)
+
+
+def cmd_ramrun(s, args):
+    """Load a RAM image through the ROM UBOOT1.00 and call it (no loader, no
+    flash access). Same semantics as fm-1-research-lab tools/fm1_ramrun.py."""
+    ensure_uboot(s)
+    if status(s).get("loader_running") == "1":
+        sys.exit("fm1t: the flash loader is running (it occupies 0x1C02000); RAM-run needs a "
+                 "fresh ROM UBOOT session. Reset the FM-1 into UBOOT again first.")
+    img = open(args.image, "rb").read()
+    for a, n in args.clear:
+        mem_write(s, a, bytes(n))
+    for a, v in args.poke:
+        mem_write(s, a, (v & 0xFFFFFFFF).to_bytes(4, "little"))
+    mem_write(s, args.addr, img)
+    back = mem_read(s, args.addr, len(img))
+    print(f"loaded {len(img)} B at {args.addr:#x}; read-back {'OK' if back == img else 'MISMATCH'}")
+    if back != img:
+        sys.exit("fm1t: image read-back mismatch; not jumping")
+    reply = request(s, f"jump {args.addr:#x} {args.arg:#x}", timeout=20)
+    print(f"jump({args.addr:#x}, arg={args.arg:#06x}): {reply}")
+    if not reply.startswith("OK"):
+        sys.exit(1)
+    for a, n in args.read:
+        data = mem_read(s, a, n)
+        for off in range(0, n, 16):
+            print(f"  {a + off:08x}: {data[off:off + 16].hex(' ')}")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -349,11 +410,18 @@ def main():
     t.add_argument("--ref", required=True, help="earlier full dump; the app area must equal it")
     t.add_argument("--sector", type=lambda x: int(x, 0), required=True)
     t.add_argument("--write", action="store_true", help="actually rewrite (default: dry run)")
+    r = sub.add_parser("ramrun")
+    r.add_argument("image")
+    r.add_argument("--addr", type=lambda x: int(x, 0), default=0x1C02000)
+    r.add_argument("--arg", type=lambda x: int(x, 0), default=0)
+    r.add_argument("--clear", type=span, action="append", default=[])
+    r.add_argument("--poke", type=span, action="append", default=[])
+    r.add_argument("--read", type=span, action="append", default=[])
     args = ap.parse_args()
 
     s = find_port(args.port)
     {"status": cmd_status, "uboot": cmd_uboot, "rekey": cmd_rekey, "runapp": cmd_runapp, "info": cmd_info, "dump": cmd_dump, "write": cmd_write,
-     "selftest-write": cmd_selftest_write}[args.cmd](s, args)
+     "selftest-write": cmd_selftest_write, "ramrun": cmd_ramrun}[args.cmd](s, args)
 
 
 if __name__ == "__main__":

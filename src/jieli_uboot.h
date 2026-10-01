@@ -9,8 +9,8 @@
 // Writes are limited to whole 4 KiB sectors inside the application area
 // [JL_WRITE_MIN, JL_WRITE_END). Header/SPL/isd_config below 0x4000 and the
 // device data from 0x93000 up are refused here, whatever the host asks.
-// Deliberately absent: block/chip erase, chip-key write, arbitrary memory
-// write other than the loader upload.
+// Deliberately absent: block/chip erase, chip-key write. RAM writes exist only
+// for the loader upload and the ROM-stage RAM-run calls below (RAM, never flash).
 
 #define JL_CHIP_KEY 0x980F
 #define JL_FLASH_ID 0x856014
@@ -60,3 +60,12 @@ bool jl_run_app(void);
 void jl_keepalive(void);
 
 uint16_t jl_crc16(const uint8_t *data, uint32_t len, uint16_t crc);
+
+// RAM-run, ROM UBOOT1.00 stage only (refused once the loader runs). Memory
+// data is ciphered/deciphered here; len <= JL_IO_SIZE. jl_rom_jump calls the
+// code like a function and fails if it does not return within the host's
+// transfer timeout (the ROM resets the chip after ~2 s anyway).
+bool jl_loader_running(void);
+bool jl_rom_mem_write(uint32_t addr, const uint8_t *data, uint16_t len);
+bool jl_rom_mem_read(uint32_t addr, uint16_t len, uint8_t *out);
+bool jl_rom_jump(uint32_t addr, uint16_t arg);

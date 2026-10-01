@@ -23,7 +23,8 @@ static char rx_line[LINE_MAX];
 static unsigned rx_len;
 static uint8_t __attribute__((aligned(4))) sector[JL_SECTOR_SIZE];
 static unsigned sector_fill;
-static bool rx_binary;      // collecting a wsec payload
+static bool rx_binary;      // collecting a wsec/memw payload
+static unsigned rx_expect;  // payload size: 4096 for wsec, LEN for memw
 static char req[LINE_MAX];
 static volatile bool req_pending;
 
@@ -42,11 +43,11 @@ void fm1_proto_rx(const char *buf, unsigned len) {
     for (unsigned i = 0; i < len; i++) {
         if (rx_binary) {
             unsigned n = len - i;
-            if (n > JL_SECTOR_SIZE - sector_fill) n = JL_SECTOR_SIZE - sector_fill;
+            if (n > rx_expect - sector_fill) n = rx_expect - sector_fill;
             memcpy(&sector[sector_fill], &buf[i], n);
             sector_fill += n;
             i += n - 1;
-            if (sector_fill == JL_SECTOR_SIZE) {
+            if (sector_fill == rx_expect) {
                 rx_binary = false;
                 __dmb();
                 req_pending = true;     // req already holds the wsec line
@@ -79,8 +80,21 @@ void fm1_proto_rx(const char *buf, unsigned len) {
         memcpy(req, rx_line, sizeof(req));
         if (!strncmp(rx_line, "wsec ", 5)) {
             sector_fill = 0;
+            rx_expect = JL_SECTOR_SIZE;
             rx_binary = true;           // the request fires once 4 KiB arrived
             continue;
+        }
+        if (!strncmp(rx_line, "memw ", 5)) {
+            // memw <addr> <len> <crc32>, then <len> raw bytes (1..4096)
+            char *p = strchr(rx_line + 5, ' ');
+            unsigned long n = p ? strtoul(p + 1, NULL, 0) : 0;
+            if (n >= 1 && n <= JL_SECTOR_SIZE) {
+                sector_fill = 0;
+                rx_expect = (unsigned)n;
+                rx_binary = true;
+                continue;
+            }
+            // bad length: hand the line to core 1, which answers ERR
         }
         __dmb();
         req_pending = true;
@@ -213,6 +227,71 @@ static void do_read(uint32_t addr, uint32_t len) {
          (time_us_64() - t0) / 1e6, (unsigned long)crc);
 }
 
+//--------------------------------------------------------------------+
+// RAM-run (ROM UBOOT1.00 stage, before the loader)
+//--------------------------------------------------------------------+
+
+// memw <addr> <len> <crc32>: payload already in sector[0..len)
+static void do_memw(uint32_t addr, uint32_t len, uint32_t crc) {
+    if (len < 1 || len > JL_SECTOR_SIZE) {
+        tx_line("ERR len");
+        return;
+    }
+    uint32_t got = crc32_update(0, sector, len);
+    if (got != crc) {
+        tx_line("ERR crc %08lX", (unsigned long)got);
+        return;
+    }
+    if (jl_loader_running()) {
+        tx_line("ERR loader-running");
+        return;
+    }
+    for (uint32_t off = 0; off < len; off += JL_IO_SIZE) {
+        uint16_t n = (uint16_t)((len - off) < JL_IO_SIZE ? (len - off) : JL_IO_SIZE);
+        if (!jl_rom_mem_write(addr + off, &sector[off], n)) {
+            tx_line("ERR memw at %08lX", (unsigned long)(addr + off));
+            return;
+        }
+    }
+    tx_line("OK");
+}
+
+// memr <addr> <len>: DATA <len>, raw bytes, END <crc32>
+static void do_memr(uint32_t addr, uint32_t len) {
+    if (len < 1 || len > JL_READ_MAX) {
+        tx_line("ERR len");
+        return;
+    }
+    if (jl_loader_running()) {
+        tx_line("ERR loader-running");
+        return;
+    }
+    for (uint32_t off = 0; off < len; off += JL_IO_SIZE) {
+        uint16_t n = (uint16_t)((len - off) < JL_IO_SIZE ? (len - off) : JL_IO_SIZE);
+        if (!jl_rom_mem_read(addr + off, n, &io[off])) {
+            tx_line("ERR memr at %08lX", (unsigned long)(addr + off));
+            return;
+        }
+    }
+    tx_line("DATA %lu", (unsigned long)len);
+    tx_bytes(io, len);
+    tx_line("END %08lX", (unsigned long)crc32_update(0, io, len));
+}
+
+// jump <addr> <arg>: call RAM code through the ROM; it must return (< ~2 s)
+static void do_jump(uint32_t addr, uint32_t arg) {
+    if (jl_loader_running()) {
+        tx_line("ERR loader-running");
+        return;
+    }
+    dlog("PROTO: jump %08lX arg %04lX", (unsigned long)addr, (unsigned long)arg);
+    uint64_t t0 = time_us_64();
+    bool ok = jl_rom_jump(addr, (uint16_t)arg);
+    uint32_t ms = (uint32_t)((time_us_64() - t0) / 1000);
+    if (ok) tx_line("OK ms=%lu", (unsigned long)ms);
+    else tx_line("ERR jump ms=%lu", (unsigned long)ms);
+}
+
 void fm1_proto_poll(void) {
     if (!req_pending) {
         jl_keepalive();
@@ -231,8 +310,8 @@ void fm1_proto_poll(void) {
     if (!argc) return;
 
     if (!strcmp(argv[0], "status")) {
-        tx_line("OK uboot=%d v15=%d loader=%d", fm1_host_uboot_ready(), fm1_host_v15_mounted(),
-                jl_have_loader());
+        tx_line("OK uboot=%d v15=%d loader=%d loader_running=%d", fm1_host_uboot_ready(),
+                fm1_host_v15_mounted(), jl_have_loader(), jl_loader_running());
     } else if (!strcmp(argv[0], "uboot")) {
         if (fm1_host_uboot_ready()) {
             tx_line("OK uboot");
@@ -266,6 +345,25 @@ void fm1_proto_poll(void) {
             tx_line("ERR no-uboot");
         } else {
             do_write_sector(strtoul(argv[1], NULL, 0), strtoul(argv[2], NULL, 16));
+        }
+    } else if (!strcmp(argv[0], "memw") && argc == 4) {
+        if (!fm1_host_uboot_ready()) {
+            tx_line("ERR no-uboot");
+        } else {
+            do_memw(strtoul(argv[1], NULL, 0), strtoul(argv[2], NULL, 0),
+                    strtoul(argv[3], NULL, 16));
+        }
+    } else if (!strcmp(argv[0], "memr") && argc == 3) {
+        if (!fm1_host_uboot_ready()) {
+            tx_line("ERR no-uboot");
+        } else {
+            do_memr(strtoul(argv[1], NULL, 0), strtoul(argv[2], NULL, 0));
+        }
+    } else if (!strcmp(argv[0], "jump") && argc == 3) {
+        if (!fm1_host_uboot_ready()) {
+            tx_line("ERR no-uboot");
+        } else {
+            do_jump(strtoul(argv[1], NULL, 0), strtoul(argv[2], NULL, 0));
         }
     } else {
         tx_line("ERR unknown");
