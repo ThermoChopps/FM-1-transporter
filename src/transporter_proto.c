@@ -17,9 +17,13 @@
 #define TX_SIZE 16384           // power of two
 #define LINE_MAX 64
 
-// core 0 -> core 1: one request line at a time.
+// core 0 -> core 1: one request line at a time, plus the 4 KiB payload of a
+// `wsec` request.
 static char rx_line[LINE_MAX];
 static unsigned rx_len;
+static uint8_t __attribute__((aligned(4))) sector[JL_SECTOR_SIZE];
+static unsigned sector_fill;
+static bool rx_binary;      // collecting a wsec payload
 static char req[LINE_MAX];
 static volatile bool req_pending;
 
@@ -36,6 +40,19 @@ static uint8_t __attribute__((aligned(4))) io[JL_IO_SIZE];
 
 void fm1_proto_rx(const char *buf, unsigned len) {
     for (unsigned i = 0; i < len; i++) {
+        if (rx_binary) {
+            unsigned n = len - i;
+            if (n > JL_SECTOR_SIZE - sector_fill) n = JL_SECTOR_SIZE - sector_fill;
+            memcpy(&sector[sector_fill], &buf[i], n);
+            sector_fill += n;
+            i += n - 1;
+            if (sector_fill == JL_SECTOR_SIZE) {
+                rx_binary = false;
+                __dmb();
+                req_pending = true;     // req already holds the wsec line
+            }
+            continue;
+        }
         char c = buf[i];
         if (c == '\r') continue;
         if (c != '\n') {
@@ -44,6 +61,13 @@ void fm1_proto_rx(const char *buf, unsigned len) {
         }
         rx_line[rx_len] = 0;
         rx_len = 0;
+        if (!strcmp(rx_line, "rekey")) {
+            extern void fm1_rekey(void);
+            tud_cdc_n_write_str(DATA_ITF, "OK rekey\n");
+            tud_cdc_n_write_flush(DATA_ITF);
+            fm1_rekey();
+            continue;
+        }
         if (!strcmp(rx_line, "ping")) {
             // Answered here so fm1t can find the port while core 1 is still
             // busy with the USB_KEY recovery.
@@ -53,6 +77,11 @@ void fm1_proto_rx(const char *buf, unsigned len) {
         }
         if (req_pending) continue;      // one request at a time; drop extras
         memcpy(req, rx_line, sizeof(req));
+        if (!strncmp(rx_line, "wsec ", 5)) {
+            sector_fill = 0;
+            rx_binary = true;           // the request fires once 4 KiB arrived
+            continue;
+        }
         __dmb();
         req_pending = true;
     }
@@ -126,6 +155,21 @@ static uint32_t crc32_update(uint32_t crc, const uint8_t *p, uint32_t len) {
     return ~crc;
 }
 
+// wsec <addr> <crc32>: write one 4 KiB sector (payload already received).
+static void do_write_sector(uint32_t addr, uint32_t crc) {
+    uint32_t got = crc32_update(0, sector, JL_SECTOR_SIZE);
+    if (got != crc) {
+        tx_line("ERR crc %08lX", (unsigned long)got);
+        return;
+    }
+    if (addr < JL_WRITE_MIN || addr >= JL_WRITE_END || (addr % JL_SECTOR_SIZE)) {
+        tx_line("ERR range");
+        return;
+    }
+    dlog("PROTO: write sector %06lX", (unsigned long)addr);
+    tx_line(jl_flash_write_sector(addr, sector) ? "OK" : "ERR write");
+}
+
 static void do_read(uint32_t addr, uint32_t len) {
     if (len == 0 || addr >= JL_FLASH_SIZE || len > JL_FLASH_SIZE - addr) {
         tx_line("ERR range");
@@ -186,7 +230,16 @@ void fm1_proto_poll(void) {
     if (!argc) return;
 
     if (!strcmp(argv[0], "status")) {
-        tx_line("OK uboot=%d loader=%d", fm1_host_uboot_ready(), jl_have_loader());
+        tx_line("OK uboot=%d v15=%d loader=%d", fm1_host_uboot_ready(), fm1_host_v15_mounted(),
+                jl_have_loader());
+    } else if (!strcmp(argv[0], "uboot")) {
+        if (fm1_host_uboot_ready()) {
+            tx_line("OK uboot");
+        } else if (fm1_host_softkey()) {
+            tx_line("OK softkey");      // poll `status` for uboot=1
+        } else {
+            tx_line("ERR no-v15");
+        }
     } else if (!strcmp(argv[0], "info")) {
         jl_info_t info;
         if (!fm1_host_uboot_ready()) {
@@ -204,6 +257,12 @@ void fm1_proto_poll(void) {
             tx_line("ERR no-uboot");
         } else {
             do_read(strtoul(argv[1], NULL, 0), strtoul(argv[2], NULL, 0));
+        }
+    } else if (!strcmp(argv[0], "wsec") && argc == 3) {
+        if (!fm1_host_uboot_ready()) {
+            tx_line("ERR no-uboot");
+        } else {
+            do_write_sector(strtoul(argv[1], NULL, 0), strtoul(argv[2], NULL, 16));
         }
     } else {
         tx_line("ERR unknown");

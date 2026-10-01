@@ -273,6 +273,20 @@ void recovery_run(void) {
     }
 }
 
+bool recovery_target_attached(void) {
+    for (int i = 0; i < 50; i++) {
+        if (!dp()) return false;
+        sleep_us(1000);
+    }
+    return true;
+}
+
+void recovery_pulses_only(uint32_t ms) {
+    dlog("PULSE: %lu ms of 1 ms pulses for an already attached target", (unsigned long)ms);
+    pulse_start();
+    sleep_ms(ms);
+}
+
 void recovery_init(void) {
     gpio_init(LED_R);
     gpio_set_dir(LED_R, GPIO_OUT);

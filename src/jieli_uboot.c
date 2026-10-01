@@ -22,6 +22,8 @@
 #define CMD_WRITE_MEMORY 0xFB06
 #define CMD_JUMP 0xFB08
 // LoaderV2
+#define CMD_ERASE_SECTOR 0xFB01
+#define CMD_WRITE_FLASH 0xFB04
 #define CMD_READ_FLASH 0xFD05
 #define CMD_READ_KEY 0xFC09
 #define CMD_GET_ONLINE_DEVICE 0xFC0A
@@ -193,6 +195,50 @@ bool jl_flash_read(uint32_t addr, uint16_t len, uint8_t *buf) {
         dlog("JL: flash read %06lX+%u failed (got %lu)", (unsigned long)addr, len,
              (unsigned long)got);
         return false;
+    }
+    return true;
+}
+
+bool jl_flash_write_sector(uint32_t addr, const uint8_t *data) {
+    if (addr < JL_WRITE_MIN || addr >= JL_WRITE_END || (addr % JL_SECTOR_SIZE)) {
+        dlog("JL: write to %06lX refused (allowed: %06X-%06X, 4 KiB aligned)",
+             (unsigned long)addr, JL_WRITE_MIN, JL_WRITE_END);
+        return false;
+    }
+    if (!jl_ensure_loader()) return false;
+
+    uint8_t args[9];
+    put_be32(args, addr);
+    if (!cmd_exec(CMD_ERASE_SECTOR, args, 4)) {
+        dlog("JL: erase %06lX failed", (unsigned long)addr);
+        return false;
+    }
+
+    for (uint32_t off = 0; off < JL_SECTOR_SIZE; off += JL_IO_SIZE) {
+        memcpy(block, &data[off], JL_IO_SIZE);
+        put_be32(args, addr + off);
+        args[4] = (uint8_t)(JL_IO_SIZE >> 8);
+        args[5] = (uint8_t)JL_IO_SIZE;
+        args[6] = 0x00;
+        uint16_t crc = jl_crc16(block, JL_IO_SIZE, 0);
+        args[7] = (uint8_t)crc;          // LE
+        args[8] = (uint8_t)(crc >> 8);
+
+        uint8_t cdb[16];
+        make_cdb(cdb, CMD_WRITE_FLASH, args, sizeof(args));
+        last_cmd_us = time_us_64();
+        if (!fm1_host_bot(cdb, 16, false, block, JL_IO_SIZE, NULL)) {
+            dlog("JL: write %06lX failed", (unsigned long)(addr + off));
+            return false;
+        }
+    }
+
+    for (uint32_t off = 0; off < JL_SECTOR_SIZE; off += JL_IO_SIZE) {
+        if (!jl_flash_read(addr + off, JL_IO_SIZE, block)) return false;
+        if (memcmp(block, &data[off], JL_IO_SIZE) != 0) {
+            dlog("JL: verify %06lX failed", (unsigned long)(addr + off));
+            return false;
+        }
     }
     return true;
 }

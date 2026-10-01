@@ -118,4 +118,24 @@ dump: 1 MiB in 20.7 s (49 KiB/s), sha256 0e14274c... == v15_expected_full_2026-1
 
 Once the loader runs, the chip resets after about 3 s without a command. While idle, the firmware sends `GET_ONLINE_DEVICE` once per second as a keepalive.
 
-Next: guarded writes, following the policy in JIELI_UBOOT_PROTOCOL.md. Never touch `[0, 0x4000)`, write only differing 4 KiB sectors, read back every sector, and verify the final full image.
+## M2: soft key and guarded writes (2026-10-01)
+
+**Soft key, no power cycle.** If the FM-1 is already on the bus when the transporter boots, the USB_KEY is skipped. The transporter sends 6 s of 1 ms pulses and then starts the host. Stock V15 failed its first SETUP without the pulses. `fm1t` info/dump/write then send the USB-MIDI soft key (`04 F0 22 24 07 35 7D F7`) to V15's MIDI OUT. V15 dropped off the bus 21 ms later and came back as UBOOT 1.0 s after that. A unit without working firmware still needs the USB_KEY: start the transporter with the FM-1 off, or run `fm1t.py rekey`, then switch the FM-1 on.
+
+**Writes.** `fm1t.py write` follows fm-1-research-lab's restore flow and is a dry run without `--write`:
+
+- package review via `fm1_ota.require_reviewed`
+- check key and flash ID
+- a full read must equal `--ref` in the package region
+- write only the differing sectors, never below 0x4000
+- read back every sector, then do a final full read
+
+The firmware also refuses any sector outside `[0x4000, 0x93000)` or not 4 KiB aligned. On hardware it returned `ERR range` for 0x0, 0x3000, 0x93000 and 0x4100, and erased nothing.
+
+Hardware check of the write path: `fm1t.py selftest-write --sector 0x92000 --write` erased sector 0x92000, rewrote it with its own bytes and read it back. The final 1 MiB read equalled the pre-write image, and stock V15 booted normally afterwards. A V15-to-V15 `write` dry run reported 0 differing sectors.
+
+Known limits:
+
+- Dumps run at 64 KiB/s. `lib/pico-pio-usb-bulk-multi-xact.patch` lets bulk transfers use more of each frame, which gained only ~30%, so the bottleneck is elsewhere.
+- If V15 boots while the transporter is already pulsing or hosting, for example after the loader watchdog fires, V15 may not attach. Reboot the transporter with V15 running, or power-cycle the FM-1 while the key runs.
+- No USB-only reset exists. A bricked unit needs one power-on. See fm-1-research-lab for PB01 long-press reset and the watchdog-first CFW plan.

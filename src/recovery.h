@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stdint.h>
 
 // Seeed XIAO RP2040: GP0/D6 -> FM-1 D+, GP1/D7 -> FM-1 D-, GND -> GND.
 #define PIN_DP 0
@@ -8,6 +9,15 @@
 
 // Claims PIO0 state machines and leaves the target bus released.
 void recovery_init(void);
+
+// True if something already pulls D+ up at boot: a running FM-1 application,
+// or a ROM UBOOT left waiting. The key is pointless then; go straight to host.
+bool recovery_target_attached(void);
+
+// Feeds the 1 ms pulses for ms without keying, then returns with them still
+// running. Stock V15 also failed its first SETUP without them; with 6 s of
+// pulses before the host started it enumerated every time.
+void recovery_pulses_only(uint32_t ms);
 
 // Sends the JieLi USB_KEY until the ROM acknowledges, then keeps feeding
 // 1 ms pulses. Returns with the pulses STILL RUNNING: the ROM gives up if

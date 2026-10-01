@@ -74,7 +74,11 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Status
 
-Experimental. M0 (automatic UBOOT entry through the PIO USB host) and M1 (loader, chip/flash info, full 1 MiB dump via `tools/fm1t.py`) work on hardware. Erase and write are deliberately not implemented yet.
+Experimental. Working on hardware:
+
+- M0: automatic UBOOT entry through the PIO USB host.
+- M1: loader, chip/flash info, full 1 MiB dump.
+- M2: USB-MIDI soft key from stock V15 (no power cycle), and guarded sector writes with read-back verify. Writes are limited to `[0x4000, 0x93000)` by the firmware and gated by fm-1-research-lab's package review in `tools/fm1t.py`.
 
 ## License
 

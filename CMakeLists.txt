@@ -1,8 +1,23 @@
 cmake_minimum_required(VERSION 3.13)
 
 # Pico-PIO-USB is vendored as a submodule, pinned to the release TinyUSB in
-# the SDK expects. It must be set before the SDK pulls in TinyUSB.
-set(PICO_PIO_USB_PATH ${CMAKE_CURRENT_LIST_DIR}/lib/Pico-PIO-USB)
+# the SDK expects. The build uses a patched copy in the build directory
+# (lib/pico-pio-usb-bulk-multi-xact.patch: several bulk packets per frame
+# instead of one), so the submodule itself stays pristine. The path must be
+# set before the SDK pulls in TinyUSB.
+set(FM1T_PIO_USB_SRC ${CMAKE_CURRENT_LIST_DIR}/lib/Pico-PIO-USB)
+set(FM1T_PIO_USB_PATCH ${CMAKE_CURRENT_LIST_DIR}/lib/pico-pio-usb-bulk-multi-xact.patch)
+set(PICO_PIO_USB_PATH ${CMAKE_BINARY_DIR}/Pico-PIO-USB-patched)
+file(REMOVE_RECURSE ${PICO_PIO_USB_PATH})
+file(COPY ${FM1T_PIO_USB_SRC}/src DESTINATION ${PICO_PIO_USB_PATH})
+execute_process(
+    COMMAND patch -p1 --forward --quiet -i ${FM1T_PIO_USB_PATCH}
+    WORKING_DIRECTORY ${PICO_PIO_USB_PATH}
+    RESULT_VARIABLE FM1T_PATCH_RESULT)
+if (NOT FM1T_PATCH_RESULT EQUAL 0)
+    message(FATAL_ERROR "Applying ${FM1T_PIO_USB_PATCH} failed")
+endif()
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${FM1T_PIO_USB_PATCH})
 
 # TinyUSB debug level (CFG_TUSB_DEBUG). 2 logs host enumeration during M0.
 set(LOG 2)

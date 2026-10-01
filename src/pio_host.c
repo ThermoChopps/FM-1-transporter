@@ -17,6 +17,7 @@
 #define HOST_RHPORT 1
 #define FM1_VID 0x4C4A
 #define FM1_PID 0x8057
+#define FM1_V15_PID 0xC755      // stock FM-1 application (USB audio + MIDI)
 #define XFER_TIMEOUT_MS 2000
 #define FIRST_CBW_DELAY_MS 1500     // macOS had the device for seconds before its first CBW
 #define INQUIRY_RETRY_MS 300
@@ -31,6 +32,7 @@ static uint64_t last_status_us;
 static uint8_t ep_in, ep_out, msc_itf;
 static tusb_desc_endpoint_t other_bulk_out;   // e.g. V15's USB-MIDI OUT, for 'm'
 static bool other_bulk_out_open;
+static bool mounted_is_v15;
 static uint32_t cbw_tag = 1;
 static volatile char pending_cmd;
 static uint64_t mount_us;
@@ -79,6 +81,32 @@ bool fm1_host_uboot_ready(void) {
     return mounted_addr != 0 && uboot_ready;
 }
 
+bool fm1_host_v15_mounted(void) {
+    return mounted_addr != 0 && mounted_is_v15;
+}
+
+static bool edpt_sync(uint8_t daddr, uint8_t ep, void *buf, uint16_t len, uint32_t *actual);
+
+// Stock V15's USB-MIDI receive path compares every 8-byte transfer with
+// 04 F0 22 24 07 35 xx F7; xx = 7D calls the mask ROM UBOOT1.00 and never
+// returns (fm-1-research-lab tools/fm1_softkey.py). Nothing is written.
+bool fm1_host_softkey(void) {
+    static CFG_TUSB_MEM_ALIGN uint8_t pkt[8] = {0x04, 0xF0, 0x22, 0x24, 0x07, 0x35, 0x7D, 0xF7};
+    uint8_t daddr = mounted_addr;
+    if (!daddr || !mounted_is_v15 || !other_bulk_out.bLength) return false;
+    if (!other_bulk_out_open) other_bulk_out_open = tuh_edpt_open(daddr, &other_bulk_out);
+
+    dlog("SOFTKEY: sending F0 22 24 35 7D F7 to USB-MIDI OUT %02X",
+         other_bulk_out.bEndpointAddress);
+    bool sent = false;
+    for (int i = 0; i < 3 && mounted_addr == daddr; i++) {
+        // The unit leaves the bus once it takes the key, so later sends may fail.
+        sent |= edpt_sync(daddr, other_bulk_out.bEndpointAddress, pkt, sizeof(pkt), NULL);
+        sleep_ms(20);
+    }
+    return sent;
+}
+
 void tuh_mount_cb(uint8_t daddr) {
     dlog("HOST: device mounted, addr=%u (%.1f ms after host start)", daddr,
          (time_us_64() - host_start_us) / 1000.0);
@@ -94,6 +122,7 @@ void tuh_umount_cb(uint8_t daddr) {
          (time_us_64() - mount_us) / 1000.0);
     mounted_addr = 0;
     uboot_ready = false;
+    mounted_is_v15 = false;
     probe_pending = false;
     inquiry_tries = 0;
     rgb(false, false, true);
@@ -250,7 +279,10 @@ static bool probe_descriptors(uint8_t daddr) {
     log_string(daddr, "product", dd.iProduct);
     log_string(daddr, "serial", dd.iSerialNumber);
 
-    if (dd.idVendor != FM1_VID || dd.idProduct != FM1_PID) {
+    mounted_is_v15 = dd.idVendor == FM1_VID && dd.idProduct == FM1_V15_PID;
+    if (mounted_is_v15) {
+        dlog("  stock FM-1 application; `uboot` (fm1t) or console k enters UBOOT via the soft key");
+    } else if (dd.idVendor != FM1_VID || dd.idProduct != FM1_PID) {
         dlog("  not the JieLi UBOOT (%04X:%04X expected)", FM1_VID, FM1_PID);
     }
 
@@ -379,6 +411,9 @@ static void run_command(uint8_t daddr, char c) {
     case 'd':
         probe_descriptors(daddr);
         break;
+    case 'k':
+        dlog("soft key: %s", fm1_host_softkey() ? "sent" : "not sent (no stock V15 mounted)");
+        break;
     case 'm': {
         // Bulk OUT sanity check against a non-MSC bulk endpoint, e.g. the
         // stock V15 USB-MIDI OUT: one Active Sensing packet, harmless.
@@ -396,7 +431,8 @@ static void run_command(uint8_t daddr, char c) {
     }
     default:
         dlog("commands: l=GET MAX LUN  i=INQUIRY  u=TEST UNIT READY  c=SET_CONFIGURATION  "
-             "r=BOT reset+clear halt  n=read IN once  d=descriptors  m=bulk OUT test (non-MSC)");
+             "r=BOT reset+clear halt  n=read IN once  d=descriptors  m=bulk OUT test (non-MSC)  "
+             "k=soft key (stock V15 -> UBOOT)");
         break;
     }
 }
@@ -447,7 +483,7 @@ void fm1_pio_host_task(void) {
     char c = pending_cmd;
     if (c) {
         pending_cmd = 0;
-        if (daddr && ((ep_in && ep_out) || c == 'm')) {
+        if (daddr && ((ep_in && ep_out) || c == 'm' || c == 'k')) {
             dlog("> %c", c);
             run_command(daddr, c);
         } else {

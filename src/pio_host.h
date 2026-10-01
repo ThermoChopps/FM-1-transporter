@@ -22,6 +22,13 @@ bool fm1_pio_host_mounted(void);
 // True once the mounted device answered INQUIRY as the JieLi UBOOT.
 bool fm1_host_uboot_ready(void);
 
+// True while the stock FM-1 application (4C4A:C755) is mounted.
+bool fm1_host_v15_mounted(void);
+
+// Sends the USB-MIDI soft key that makes stock V15 jump into the mask ROM
+// UBOOT1.00 (the unit then re-attaches as 4C4A:8057). Core 1 only.
+bool fm1_host_softkey(void);
+
 // One Bulk-Only Transport command to the mounted UBOOT (core 1 only).
 // buf must be word-aligned RAM; len == 0 means no data stage.
 bool fm1_host_bot(const uint8_t *cdb, uint8_t cdb_len, bool in, void *buf, uint16_t len,

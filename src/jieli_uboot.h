@@ -6,13 +6,19 @@
 // JieLi WL82 UBOOT1.00 + wl82loader (LoaderV2), read-only subset.
 // See docs/JIELI_UBOOT_PROTOCOL.md. Core 1 only.
 //
-// Deliberately absent: erase, flash write, memory write other than the
-// loader upload, chip-key write.
+// Writes are limited to whole 4 KiB sectors inside the application area
+// [JL_WRITE_MIN, JL_WRITE_END). Header/SPL/isd_config below 0x4000 and the
+// device data from 0x93000 up are refused here, whatever the host asks.
+// Deliberately absent: block/chip erase, chip-key write, arbitrary memory
+// write other than the loader upload.
 
 #define JL_CHIP_KEY 0x980F
 #define JL_FLASH_ID 0x856014
 #define JL_FLASH_SIZE (1024u * 1024u)
 #define JL_IO_SIZE 512
+#define JL_SECTOR_SIZE 0x1000
+#define JL_WRITE_MIN 0x4000
+#define JL_WRITE_END 0x93000
 
 typedef struct {
     uint16_t chip_key;
@@ -34,6 +40,10 @@ bool jl_info(jl_info_t *info);
 // Reads len (<= JL_IO_SIZE) bytes of SPI flash at addr into buf.
 // buf must be word-aligned RAM.
 bool jl_flash_read(uint32_t addr, uint16_t len, uint8_t *buf);
+
+// Erases one 4 KiB sector, writes it and reads it back. Returns false (and
+// touches nothing) if addr is outside the writable area or misaligned.
+bool jl_flash_write_sector(uint32_t addr, const uint8_t *data);
 
 // Sends a harmless GET_ONLINE_DEVICE if the loader has been idle for 1 s.
 // The loader resets the chip after ~3 s without a command.

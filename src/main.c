@@ -14,6 +14,7 @@
 #include "pico/stdlib.h"
 #include "pico/multicore.h"
 #include "hardware/clocks.h"
+#include "hardware/watchdog.h"
 #include "tusb.h"
 
 #include "log.h"
@@ -22,6 +23,15 @@
 #include "transporter_proto.h"
 
 #define CONSOLE_WAIT_MS 10000
+#define ATTACHED_PULSE_MS 6000      // as in the runs where V15 enumerated
+#define REKEY_MAGIC 0x4B455931      // "KEY1" in watchdog scratch 0: force USB_KEY
+
+// Reboots the transporter straight into USB_KEY mode even if D+ is pulled up,
+// for a unit stuck with its USB up. The FM-1 then needs one power cycle.
+void fm1_rekey(void) {
+    watchdog_hw->scratch[0] = REKEY_MAGIC;
+    watchdog_reboot(0, 0, 50);
+}
 
 static volatile bool console_ready;
 
@@ -33,7 +43,8 @@ static void core1_main(void) {
 
     printf("\nFM-1 Transporter M0\n");
     printf("XIAO RP2040: D+=GP0/D6 D-=GP1/D7, PIO host on PIO1\n");
-    printf("Keep the FM-1 switched OFF until told, then switch it ON.\n");
+    printf("If the FM-1 runs stock V15, leave it on: fm1t enters UBOOT via the soft key.\n");
+    printf("Otherwise switch it OFF, and ON again once the key is running.\n");
 
     recovery_init();
 #if FM1T_HOST_ONLY
@@ -41,7 +52,17 @@ static void core1_main(void) {
     // FM-1 already in UBOOT (e.g. via the V15 USB-MIDI soft key).
     dlog("HOST-ONLY build: skipping USB_KEY recovery");
 #else
-    recovery_run();
+    bool force_key = watchdog_hw->scratch[0] == REKEY_MAGIC;
+    watchdog_hw->scratch[0] = 0;
+    if (force_key) {
+        dlog("REKEY: USB_KEY forced; power-cycle the FM-1 now");
+        recovery_run();
+    } else if (recovery_target_attached()) {
+        dlog("D+ already pulled up (FM-1 app or a waiting UBOOT) - skipping USB_KEY");
+        recovery_pulses_only(ATTACHED_PULSE_MS);
+    } else {
+        recovery_run();
+    }
 #endif
 
     // The ROM is holding D+ up and our pulses are still running. Swap owners
