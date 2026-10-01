@@ -1,72 +1,102 @@
 # M0 bring-up checklist
 
+**Status: M0 passed on hardware, 2026-10-01.** XIAO RP2040 at 120 MHz, 3 wires, no VBUS. Log: [logs/m0_success_2026-10-01.log](logs/m0_success_2026-10-01.log).
+
+```
+ACK after 64724 packets -> 6000 ms of pulses (D+ held) -> HANDOFF in 1076 us
+-> mounted 522 ms after host start -> 4C4A:8057 "WL80UBOOT1.00"
+-> GET MAX LUN 0 -> INQUIRY "WL82" / "UBOOT1.00" / "1.00", 1.5 s after mount
+```
+
+The UBOOT stayed attached afterwards.
+
+Lessons from the first attempts:
+
+- `CFG_TUH_API_EDPT_XFER` must be 1. Without it, TinyUSB silently drops the completion of raw `tuh_edpt_xfer()` transfers. The CBW looked NAKed, the retries put the BOT state machine out of sync, and the ROM detached after about 4-5 s.
+- Stock V15 attaches to USB without VBUS (`4C4A:C755`, 293-byte config). Use it to test the host side without the key path.
+- If the FM-1 is already running V15 when the XIAO boots, recovery mistakes V15's D+ pull-up for the ROM. Switch the FM-1 off before resetting the XIAO.
+
 The objective is one automatic transition:
 
 ```
-USB_KEY -> JieLi ROM calibration -> PIO USB Host -> UBOOT descriptor
+USB_KEY -> ROM holds D+ under 1 ms pulses -> PIO USB Host -> UBOOT descriptor
 ```
 
-No flash writes in M0.
+No memory or flash commands in M0. The only class request is a read-only SCSI INQUIRY.
 
-## 1. Baseline
+Protocol and hardware findings: [JIELI_UBOOT_PROTOCOL.md](JIELI_UBOOT_PROTOCOL.md).
 
-- [ ] Build `fm1_transporter.uf2`.
-- [ ] Flash XIAO RP2040.
-- [ ] Verify USB console appears.
-- [ ] Verify existing three-wire recovery still reaches `RECOVERY READY` at 120 MHz.
-
-If this fails, revert only the 120 MHz clock change first. The PIO key timing divider is calculated from `clk_sys`, but the regression must still be measured on hardware.
-
-## 2. Replace stdio USB ownership
-
-Do not simply add `tuh_init(1)` beside Pico SDK USB stdio.
-
-Move the Mac-facing port to an explicit TinyUSB device CDC configuration:
-
-- rhport 0: RP2040 native USB device / CDC
-- rhport 1: Pico-PIO-USB host
-- core 0: device/control task
-- core 1: host task after handoff
-
-This follows Pico-PIO-USB's dual-controller example and avoids two independent owners of the TinyUSB stack.
-
-## 3. Delayed host start
-
-Core 1 waits on a start flag. It must not initialize or drive the PIO USB host while recovery owns GP0/GP1.
-
-After `sof_phase()` succeeds:
-
-1. `target_bus_release()`
-2. verify both recovery state machines are disabled
-3. leave GP0/GP1 as inputs
-4. short guard delay
-5. signal core 1
-6. core 1 configures PIO USB with `pin_dp = 0`
-7. `tuh_configure(1, TUH_CFGID_RPI_PIO_USB_CONFIGURATION, &cfg)`
-8. `tuh_init(1)`
-9. repeatedly call `tuh_task()`
-
-## 4. Enumeration callback
-
-First success criterion:
+## Build
 
 ```
-RECOVERY READY
-PIO HOST START
-DEVICE ATTACHED addr=1
-VID=....
-PID=....
+cmake -S . -B build -DPICO_SDK_PATH=$HOME/pico-sdk -DPICO_BOARD=seeed_xiao_rp2040
+make -C build -j8
+```
+
+Outputs:
+
+- `fm1_transporter.uf2`: M0, USB_KEY recovery then PIO USB host.
+- `fm1_transporter_hostonly.uf2`: PIO USB host only. Use it to bring up the host side without the key path, with any full-speed device or an FM-1 already in UBOOT.
+
+Pico-PIO-USB is the `lib/Pico-PIO-USB` submodule, pinned to 0.6.1, the version TinyUSB 0.18 in pico-sdk 2.2.0 expects. Run `git submodule update --init` after cloning.
+
+Flash: `picotool load -f -x build/fm1_transporter.uf2`. The firmware keeps the Raspberry Pi reset interface, so `picotool -f` and a 1200 baud touch still work.
+
+## Firmware layout
+
+- rhport 0: RP2040 native USB device. A CDC console with the log on the Mac.
+- rhport 1: Pico-PIO-USB host on PIO1, with `pin_dp = 0` (GP0 = D+, GP1 = D-).
+- core 0: `tud_task()` and log drain.
+- core 1: recovery on PIO0, then handoff, then `tuh_task()`.
+
+Both owners of GP0/GP1 live on core 1, so the handoff is one call sequence. There is no cross-core signalling in the critical gap.
+
+## Handoff rule (changed 2026-10-01)
+
+The original plan was to "start the host after `sof_phase()` succeeds" (D+ released after calibration). That never happens on hardware. In every successful run the ROM held D+ high for the full 6 s of pulses. The old baseline then stopped the pulses and the ROM gave up.
+
+Current rule:
+
+1. Send the key on polarity A only.
+2. On ACK, wait for the ROM's D+ pull-up. A D- pull-up instead means the wires are swapped.
+3. Start the 1 ms pulses.
+4. Once D+ has been held high under pulses for `HANDOFF_PULSE_MS` (6000 ms, the pulse time of every proven run; the ROM may need far less, so lower it once M0 works), leave the pulses running.
+5. `recovery_release_bus()`: disable the PIO0 state machines, return the pins to SIO inputs, clear the overrides.
+6. Immediately `tuh_configure()` + `tuh_init(1)`. The log prints the gap in µs.
+
+Known gap: after Pico-PIO-USB sees the attach, TinyUSB waits about 450 ms (`ENUM_DEBOUNCING_DELAY_MS`) before bus reset. During that time neither our pulses nor SOFs reach the ROM. The manual cable swap was a gap of seconds and still worked, so this is expected to be fine. Measured: the ROM still held D+ after 3.0 s without pulses, once it had been pulsed for 6 s (fm-1-research-lab notes/usbkey-xiao-run1.log).
+
+## Test 1: host-only
+
+- [ ] Flash `fm1_transporter_hostonly.uf2`.
+- [ ] Attach any full-speed USB device to GP0/GP1/GND (with 5 V if it needs power) and check that `DEVICE DESCRIPTOR OK` appears.
+- [ ] Optional: put a stock V15 FM-1 into UBOOT via the USB-MIDI soft key, move its cable to the XIAO, and check that `VID=4C4A PID=8057` and `INQUIRY OK: vendor="WL82"` appear.
+
+## Test 2: full M0
+
+- [ ] Flash `fm1_transporter.uf2` with the FM-1 OFF.
+- [ ] Open the console, then switch the FM-1 ON when prompted.
+
+Expected log:
+
+```
+KEY: sending 0x16EF, polarity A ...
+ACK (data line held low) after N packets
+PULSE: D+ high (ROM pull-up), sending 4 us pulses every 1 ms
+PULSE: D+ held high for 6000 ms - ROM waiting for host
+HANDOFF: pulses stopped, PIO host started in N us
+HOST: device mounted, addr=1
 DEVICE DESCRIPTOR OK
+  VID=4C4A PID=8057 ...
+  product: "WL80UBOOT1.00"
+CONFIGURATION DESCRIPTOR ...
+HOST: MSC bulk OUT=.. IN=..
+INQUIRY OK: vendor="WL82    " product="UBOOT1.00 ..." rev="1.00"
+M0 DONE
 ```
 
-Read device and configuration descriptors. Record interface class/subclass/protocol and endpoints before choosing the UBOOT transport implementation.
+The UBOOT stays idle and connected afterwards. When the host releases it (for example when the XIAO is unplugged or reset), the ROM resets and boots flash, so with stock V15 expect a re-attach as `4C4A:C755`.
 
-## 5. Only then enable MSC
+## After M0
 
-The JieLi UBOOT work should be implemented read-only first:
-
-- probe
-- chip/flash info
-- dump
-
-Do not expose erase/write until dump + verification are reliable.
+Read-only first: loader upload + READ_KEY + GET_ONLINE_DEVICE, then a full flash dump. Erase/write comes only after dump + verification are reliable, and follows the policy in JIELI_UBOOT_PROTOCOL.md.

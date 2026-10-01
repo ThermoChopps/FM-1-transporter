@@ -40,15 +40,14 @@ fm1t reset
 
 **M0: automatic UBOOT enumeration**
 
-1. Send JieLi USB hardware boot key `0x16EF`.
+1. Send JieLi USB hardware boot key `0x16EF` (polarity A).
 2. Detect the target acknowledgement.
-3. Supply the ROM's 1 ms calibration pulses.
-4. Release D+/D- completely.
-5. Hand GP0/GP1 to a Pico-PIO-USB host controller.
-6. Enumerate `WL82 UBOOT1.00` without moving the cable.
-7. Print the USB descriptor to the XIAO's native USB console.
+3. Supply 1 ms pulses while the ROM holds D+ high.
+4. Release D+/D- and hand GP0/GP1 to a Pico-PIO-USB host controller immediately.
+5. Enumerate `WL80UBOOT1.00` (`4C4A:8057`) without moving the cable.
+6. Print the USB descriptors and a read-only SCSI INQUIRY to the XIAO's native USB console.
 
-The working USB_KEY implementation is preserved first; PIO USB Host is added after that handoff boundary.
+See [docs/M0_BRINGUP.md](docs/M0_BRINGUP.md) and [docs/JIELI_UBOOT_PROTOCOL.md](docs/JIELI_UBOOT_PROTOCOL.md).
 
 ## Prototype wiring
 
@@ -66,7 +65,7 @@ For a permanent programmer, add approximately 22-27 ohm series resistors on D+ a
 
 - RP2040 native USB: Mac-facing device/control channel
 - PIO0: JieLi USB_KEY and ROM calibration pulse generator
-- PIO1: planned Pico-PIO-USB host
+- PIO1: Pico-PIO-USB host
 - GP0/GP1: shared target D+/D-, with explicit ownership handoff
 - Target-side USB host: TinyUSB + Pico-PIO-USB
 - Future UBOOT transport: JieLi MSC/SCSI command protocol
@@ -75,7 +74,7 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Status
 
-Experimental. The current firmware only performs the recovery entry sequence. Flash write support is deliberately not enabled yet.
+Experimental. M0 firmware is implemented but not yet tested on hardware. It performs the recovery entry, the PIO USB host handoff and read-only descriptor/INQUIRY probing. Memory and flash commands are deliberately not implemented yet.
 
 ## License
 

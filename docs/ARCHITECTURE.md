@@ -2,7 +2,7 @@
 
 ## Design rule
 
-Do not change the already-working JieLi USB_KEY sequence while bringing up the USB host. The first host milestone begins only after the ROM calibration phase has succeeded.
+Do not change the already-working JieLi USB_KEY sequence while bringing up the USB host. The ROM never releases D+ while pulses arrive, and gives up if they stop before a host takes over, so the host starts while the ROM is still holding D+ (see docs/M0_BRINGUP.md, "Handoff rule").
 
 ## Target state machine
 
@@ -19,10 +19,10 @@ WAIT_ACK
 WAIT_DP_PULLUP
       |
       v
-ROM_SOF_CALIBRATION
+ROM_KEEPALIVE_PULSES   (until D+ held high for HANDOFF_PULSE_MS; pulses keep running)
       |
       v
-RELEASE_TARGET_BUS
+RELEASE_TARGET_BUS     (immediately followed by host start)
       |
       v
 PIO_USB_HOST_START
@@ -47,12 +47,13 @@ PIO0 owns GP0/GP1 only while a USB_KEY packet or calibration pulse is actively b
 The handoff must be explicit:
 
 1. Disable the USB_KEY state machine.
-2. Disable the calibration/SOF state machine.
-3. Return GP0/GP1 to SIO.
+2. Disable the keep-alive pulse state machine.
+3. Return GP0/GP1 to SIO and clear the pad overrides.
 4. Set both pins to input/high-impedance.
-5. Wait for a short guard interval.
-6. Initialize Pico-PIO-USB on PIO1.
-7. Start TinyUSB host on rhport 1.
+5. Initialize Pico-PIO-USB on PIO1 at once. There is no guard delay, because the ROM is waiting.
+6. Start TinyUSB host on rhport 1.
+
+Recovery and host both run on core 1, so this is one call sequence.
 
 Never allow the recovery PIO and USB host PIO to drive GP0/GP1 simultaneously.
 
@@ -104,19 +105,21 @@ Implement `info` and flash dump before erase/write.
 
 Add erase/write/verify only after readback is reliable. Preserve the stock SPL/UBOOT region by policy; initial CFW work targets the application area only.
 
-## Planned source split
+## Source layout
 
 ```
 src/
-  main.c              state machine / console
-  recovery.c          USB_KEY + calibration
-  target_bus.c        GP0/GP1 ownership and handoff
-  pio_host.c          Pico-PIO-USB / TinyUSB host
-  jieli_uboot.c       UBOOT protocol
-  transporter_proto.c Mac-facing command protocol
+  main.c              core split, recovery -> host handoff
+  recovery.c          USB_KEY + keep-alive pulses, GP0/GP1 release
+  pio_host.c          Pico-PIO-USB / TinyUSB host, descriptors, BOT
+  usb_device.c        Mac-facing CDC + reset interface descriptors
+  log.c               cross-core log ring buffer -> CDC
+  tusb_config.h
+  (planned) jieli_uboot.c       UBOOT protocol
+  (planned) transporter_proto.c Mac-facing command protocol
 
 pio/
   usb_key.pio
+lib/
+  Pico-PIO-USB        submodule, 0.6.1
 ```
-
-The first commit intentionally keeps the known-good recovery code together. Split it only after the baseline is reproduced from this repository.
