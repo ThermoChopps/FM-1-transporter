@@ -47,7 +47,7 @@ uint32_t log_dropped(void) {
 }
 
 void log_drain(void) {
-    if (!tud_cdc_connected()) {
+    if (!tud_cdc_n_connected(0)) {
         // Keep the newest output; nobody is listening yet.
         uint32_t h = head;
         if (h - tail > LOG_BUF_SIZE / 2) tail = h - LOG_BUF_SIZE / 2;
@@ -60,7 +60,7 @@ void log_drain(void) {
         uint32_t t = tail;
         if (h == t) break;
 
-        uint32_t avail = tud_cdc_write_available();
+        uint32_t avail = tud_cdc_n_write_available(0);
         if (!avail) break;
 
         uint32_t idx = t & (LOG_BUF_SIZE - 1);
@@ -68,11 +68,11 @@ void log_drain(void) {
         if (n > LOG_BUF_SIZE - idx) n = LOG_BUF_SIZE - idx;
         if (n > avail) n = avail;
 
-        n = tud_cdc_write(&buf[idx], n);
+        n = tud_cdc_n_write(0, &buf[idx], n);
         tail = t + n;
     }
 
-    tud_cdc_write_flush();
+    tud_cdc_n_write_flush(0);
 }
 
 void dlog(const char *fmt, ...) {

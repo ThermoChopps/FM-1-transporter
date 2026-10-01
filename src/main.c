@@ -19,6 +19,7 @@
 #include "log.h"
 #include "pio_host.h"
 #include "recovery.h"
+#include "transporter_proto.h"
 
 #define CONSOLE_WAIT_MS 10000
 
@@ -59,12 +60,29 @@ static void core1_main(void) {
     }
 }
 
-void tud_cdc_rx_cb(uint8_t itf) {
-    (void)itf;
-    char buf[16];
-    uint32_t n = tud_cdc_read(buf, sizeof(buf));
+// Console (CDC 0): one-letter diagnostic commands, each on its own line.
+// Anything longer is answered with the help text by fm1_pio_host_command().
+static void console_rx(const char *buf, uint32_t n) {
+    static char line[8];
+    static uint32_t len;
     for (uint32_t i = 0; i < n; i++) {
-        if (buf[i] > ' ') fm1_pio_host_command(buf[i]);
+        char c = buf[i];
+        if (c == '\r' || c == '\n') {
+            if (len) fm1_pio_host_command(len == 1 ? line[0] : '?');
+            len = 0;
+        } else if (len < sizeof(line)) {
+            line[len++] = c;
+        }
+    }
+}
+
+void tud_cdc_rx_cb(uint8_t itf) {
+    char buf[64];
+    uint32_t n = tud_cdc_n_read(itf, buf, sizeof(buf));
+    if (itf == 0) {
+        console_rx(buf, n);
+    } else {
+        fm1_proto_rx(buf, n);
     }
 }
 
@@ -80,7 +98,8 @@ int main(void) {
 
     for (;;) {
         tud_task();
-        console_ready = tud_cdc_connected();
+        console_ready = tud_cdc_n_connected(0);
         log_drain();
+        fm1_proto_drain();
     }
 }

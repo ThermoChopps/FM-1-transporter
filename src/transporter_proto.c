@@ -1,0 +1,211 @@
+#include "transporter_proto.h"
+
+#include <stdarg.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "pico/stdlib.h"
+#include "hardware/sync.h"
+#include "tusb.h"
+
+#include "jieli_uboot.h"
+#include "log.h"
+#include "pio_host.h"
+
+#define DATA_ITF 1
+#define TX_SIZE 16384           // power of two
+#define LINE_MAX 64
+
+// core 0 -> core 1: one request line at a time.
+static char rx_line[LINE_MAX];
+static unsigned rx_len;
+static char req[LINE_MAX];
+static volatile bool req_pending;
+
+// core 1 -> core 0: output stream with backpressure.
+static uint8_t tx[TX_SIZE];
+static volatile uint32_t tx_head;   // core 1
+static volatile uint32_t tx_tail;   // core 0
+
+static uint8_t __attribute__((aligned(4))) io[JL_IO_SIZE];
+
+//--------------------------------------------------------------------+
+// core 0
+//--------------------------------------------------------------------+
+
+void fm1_proto_rx(const char *buf, unsigned len) {
+    for (unsigned i = 0; i < len; i++) {
+        char c = buf[i];
+        if (c == '\r') continue;
+        if (c != '\n') {
+            if (rx_len < LINE_MAX - 1) rx_line[rx_len++] = c;
+            continue;
+        }
+        rx_line[rx_len] = 0;
+        rx_len = 0;
+        if (!strcmp(rx_line, "ping")) {
+            // Answered here so fm1t can find the port while core 1 is still
+            // busy with the USB_KEY recovery.
+            tud_cdc_n_write_str(DATA_ITF, "PONG\n");
+            tud_cdc_n_write_flush(DATA_ITF);
+            continue;
+        }
+        if (req_pending) continue;      // one request at a time; drop extras
+        memcpy(req, rx_line, sizeof(req));
+        __dmb();
+        req_pending = true;
+    }
+}
+
+void fm1_proto_drain(void) {
+    if (!tud_cdc_n_connected(DATA_ITF)) {
+        tx_tail = tx_head;              // nobody listening; discard
+        return;
+    }
+    for (;;) {
+        uint32_t h = tx_head;
+        __dmb();
+        uint32_t t = tx_tail;
+        if (h == t) break;
+        uint32_t avail = tud_cdc_n_write_available(DATA_ITF);
+        if (!avail) break;
+        uint32_t idx = t & (TX_SIZE - 1);
+        uint32_t n = h - t;
+        if (n > TX_SIZE - idx) n = TX_SIZE - idx;
+        if (n > avail) n = avail;
+        n = tud_cdc_n_write(DATA_ITF, &tx[idx], n);
+        __dmb();
+        tx_tail = t + n;
+    }
+    tud_cdc_n_write_flush(DATA_ITF);
+}
+
+//--------------------------------------------------------------------+
+// core 1
+//--------------------------------------------------------------------+
+
+static void tx_bytes(const void *data, uint32_t len) {
+    const uint8_t *p = data;
+    while (len) {
+        uint32_t h = tx_head;
+        uint32_t space = TX_SIZE - (h - tx_tail);
+        if (!space) {
+            tight_loop_contents();      // core 0 is draining
+            continue;
+        }
+        uint32_t n = len < space ? len : space;
+        for (uint32_t i = 0; i < n; i++) tx[(h + i) & (TX_SIZE - 1)] = p[i];
+        __dmb();
+        tx_head = h + n;
+        p += n;
+        len -= n;
+    }
+}
+
+static void tx_line(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+static void tx_line(const char *fmt, ...) {
+    char line[96];
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(line, sizeof(line) - 1, fmt, ap);
+    va_end(ap);
+    if (n < 0) return;
+    if (n > (int)sizeof(line) - 2) n = (int)sizeof(line) - 2;
+    line[n++] = '\n';
+    tx_bytes(line, (uint32_t)n);
+}
+
+// zlib-compatible CRC-32, so the Mac side can use zlib.crc32.
+static uint32_t crc32_update(uint32_t crc, const uint8_t *p, uint32_t len) {
+    crc = ~crc;
+    while (len--) {
+        crc ^= *p++;
+        for (int b = 0; b < 8; b++) crc = (crc >> 1) ^ (0xEDB88320u & (0u - (crc & 1)));
+    }
+    return ~crc;
+}
+
+static void do_read(uint32_t addr, uint32_t len) {
+    if (len == 0 || addr >= JL_FLASH_SIZE || len > JL_FLASH_SIZE - addr) {
+        tx_line("ERR range");
+        return;
+    }
+    if (!jl_ensure_loader()) {
+        tx_line("ERR loader");
+        return;
+    }
+
+    dlog("PROTO: read %06lX+%lu", (unsigned long)addr, (unsigned long)len);
+    uint64_t t0 = time_us_64();
+    tx_line("DATA %lu", (unsigned long)len);
+
+    uint32_t crc = 0;
+    for (uint32_t off = 0; off < len; off += JL_IO_SIZE) {
+        uint16_t n = (uint16_t)((len - off) < JL_IO_SIZE ? (len - off) : JL_IO_SIZE);
+        bool ok = false;
+        for (int attempt = 0; attempt < 3 && !ok; attempt++) {
+            ok = jl_flash_read(addr + off, n, io);
+        }
+        if (!ok) {
+            // The Mac side counts bytes, so the stream cannot be resynced.
+            // Pad with zeros and report the failure in END.
+            memset(io, 0, n);
+            tx_bytes(io, n);
+            for (off += n; off < len; off += JL_IO_SIZE) {
+                uint32_t m = (len - off) < JL_IO_SIZE ? (len - off) : JL_IO_SIZE;
+                tx_bytes(io, m);
+            }
+            tx_line("END FAIL");
+            return;
+        }
+        crc = crc32_update(crc, io, n);
+        tx_bytes(io, n);
+    }
+
+    tx_line("END %08lX", (unsigned long)crc);
+    dlog("PROTO: read done, %lu bytes in %.2f s, crc32 %08lX", (unsigned long)len,
+         (time_us_64() - t0) / 1e6, (unsigned long)crc);
+}
+
+void fm1_proto_poll(void) {
+    if (!req_pending) {
+        jl_keepalive();
+        return;
+    }
+    __dmb();
+    char line[LINE_MAX];
+    memcpy(line, req, sizeof(line));
+    req_pending = false;
+
+    char *argv[4] = {0};
+    int argc = 0;
+    for (char *tok = strtok(line, " \t"); tok && argc < 4; tok = strtok(NULL, " \t")) {
+        argv[argc++] = tok;
+    }
+    if (!argc) return;
+
+    if (!strcmp(argv[0], "status")) {
+        tx_line("OK uboot=%d loader=%d", fm1_host_uboot_ready(), jl_have_loader());
+    } else if (!strcmp(argv[0], "info")) {
+        jl_info_t info;
+        if (!fm1_host_uboot_ready()) {
+            tx_line("ERR no-uboot");
+        } else if (!jl_info(&info)) {
+            tx_line("ERR info");
+        } else {
+            dlog("PROTO: chip key %04X, device type %u, flash id %06lX", info.chip_key,
+                 info.dev_type, (unsigned long)info.flash_id);
+            tx_line("OK key=%04X type=%u id=%06lX", info.chip_key, info.dev_type,
+                    (unsigned long)info.flash_id);
+        }
+    } else if (!strcmp(argv[0], "read") && argc == 3) {
+        if (!fm1_host_uboot_ready()) {
+            tx_line("ERR no-uboot");
+        } else {
+            do_read(strtoul(argv[1], NULL, 0), strtoul(argv[2], NULL, 0));
+        }
+    } else {
+        tx_line("ERR unknown");
+    }
+}

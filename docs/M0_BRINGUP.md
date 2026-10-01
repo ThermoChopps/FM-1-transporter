@@ -97,6 +97,25 @@ M0 DONE
 
 The UBOOT stays idle and connected afterwards. When the host releases it (for example when the XIAO is unplugged or reset), the ROM resets and boots flash, so with stock V15 expect a re-attach as `4C4A:C755`.
 
-## After M0
+## M1: read-only loader and dump (passed 2026-10-01)
 
-Read-only first: loader upload + READ_KEY + GET_ONLINE_DEVICE, then a full flash dump. Erase/write comes only after dump + verification are reliable, and follows the policy in JIELI_UBOOT_PROTOCOL.md.
+The firmware embeds `wl82loader.bin` at build time from `FM1T_LOADER_BIN`, which defaults to the jl-uboot-tool copy under `~/.fm1`. It is never committed.
+
+The Mac talks to the second CDC port with `tools/fm1t.py` (needs pyserial):
+
+```
+python3 tools/fm1t.py info
+python3 tools/fm1t.py dump out.bin --compare ref.bin
+```
+
+Result on the unit restored to stock V15:
+
+```
+loader upload 24064 B in 0.48 s
+info: key=980F type=3 id=856014
+dump: 1 MiB in 20.7 s (49 KiB/s), sha256 0e14274c... == v15_expected_full_2026-10-01.bin
+```
+
+Once the loader runs, the chip resets after about 3 s without a command. While idle, the firmware sends `GET_ONLINE_DEVICE` once per second as a keepalive.
+
+Next: guarded writes, following the policy in JIELI_UBOOT_PROTOCOL.md. Never touch `[0, 0x4000)`, write only differing 4 KiB sectors, read back every sector, and verify the final full image.

@@ -15,6 +15,25 @@ set(CMAKE_CXX_STANDARD 17)
 
 pico_sdk_init()
 
+# JieLi wl82loader.bin (24064 B, from jl-uboot-tool) is embedded at build time
+# so the transporter can run the flash loader. It is a third-party blob and
+# is never committed; without it the firmware builds, but `info`/`read` fail.
+set(FM1T_LOADER_BIN "$ENV{HOME}/.fm1/FM-1-RE/3rd-party/jl-uboot-tool/data/loaderblobs/usb/wl82loader.bin"
+    CACHE FILEPATH "Path to wl82loader.bin")
+set(FM1T_GEN_DIR ${CMAKE_CURRENT_BINARY_DIR}/generated)
+if (EXISTS ${FM1T_LOADER_BIN})
+    file(READ ${FM1T_LOADER_BIN} FM1T_LOADER_HEX HEX)
+    string(REGEX REPLACE "([0-9a-f][0-9a-f])" "0x\\1," FM1T_LOADER_HEX "${FM1T_LOADER_HEX}")
+    file(WRITE ${FM1T_GEN_DIR}/wl82loader.h
+        "// Generated from ${FM1T_LOADER_BIN}. Do not commit.\n"
+        "static const uint8_t wl82loader[] = {${FM1T_LOADER_HEX}};\n")
+    set(FM1T_HAVE_LOADER 1)
+    message(STATUS "FM-1 Transporter: embedding ${FM1T_LOADER_BIN}")
+else()
+    set(FM1T_HAVE_LOADER 0)
+    message(WARNING "FM-1 Transporter: ${FM1T_LOADER_BIN} not found; building without the flash loader")
+endif()
+
 function(fm1t_add_firmware TARGET)
     add_executable(${TARGET}
         src/main.c
@@ -22,14 +41,17 @@ function(fm1t_add_firmware TARGET)
         src/pio_host.c
         src/usb_device.c
         src/log.c
+        src/jieli_uboot.c
+        src/transporter_proto.c
     )
 
     pico_generate_pio_header(${TARGET}
         ${CMAKE_CURRENT_LIST_DIR}/pio/usb_key.pio
     )
 
-    # tusb_config.h
-    target_include_directories(${TARGET} PRIVATE ${CMAKE_CURRENT_LIST_DIR}/src)
+    # tusb_config.h, generated wl82loader.h
+    target_include_directories(${TARGET} PRIVATE ${CMAKE_CURRENT_LIST_DIR}/src ${FM1T_GEN_DIR})
+    target_compile_definitions(${TARGET} PRIVATE FM1T_HAVE_LOADER=${FM1T_HAVE_LOADER})
 
     target_link_libraries(${TARGET}
         pico_stdlib

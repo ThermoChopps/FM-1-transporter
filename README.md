@@ -74,7 +74,7 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Status
 
-Experimental. M0 firmware is implemented but not yet tested on hardware. It performs the recovery entry, the PIO USB host handoff and read-only descriptor/INQUIRY probing. Memory and flash commands are deliberately not implemented yet.
+Experimental. M0 (automatic UBOOT entry through the PIO USB host) and M1 (loader, chip/flash info, full 1 MiB dump via `tools/fm1t.py`) work on hardware. Erase and write are deliberately not implemented yet.
 
 ## License
 

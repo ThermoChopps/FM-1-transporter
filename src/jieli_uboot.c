@@ -1,0 +1,204 @@
+// JieLi WL82 UBOOT1.00 / LoaderV2 protocol, read-only subset.
+// Ported from jl-uboot-tool (jltech/uboot.py, cipher.py, crc.py) and the
+// fm-1-research-lab flow in tools/fm1_uboot_restore.py.
+
+#include "jieli_uboot.h"
+
+#include <string.h>
+
+#include "pico/stdlib.h"
+
+#include "log.h"
+#include "pio_host.h"
+
+#if FM1T_HAVE_LOADER
+#include "wl82loader.h"     // generated at build time, never committed
+#endif
+
+#define LOADER_ADDR 0x1C02000u
+#define LOADER_ARG 0x0001
+
+// ROM UBOOT1.00
+#define CMD_WRITE_MEMORY 0xFB06
+#define CMD_JUMP 0xFB08
+// LoaderV2
+#define CMD_READ_FLASH 0xFD05
+#define CMD_READ_KEY 0xFC09
+#define CMD_GET_ONLINE_DEVICE 0xFC0A
+
+#define KEEPALIVE_MS 1000   // the loader resets the chip after ~3 s without a command
+
+static bool loader_running;
+static uint64_t last_cmd_us;
+
+static uint8_t __attribute__((aligned(4))) resp[16];
+static uint8_t __attribute__((aligned(4))) block[JL_IO_SIZE];
+
+void jl_reset(void) {
+    loader_running = false;
+}
+
+bool jl_have_loader(void) {
+#if FM1T_HAVE_LOADER
+    return true;
+#else
+    return false;
+#endif
+}
+
+// CRC-16/XMODEM (poly 0x1021, no reflection), with caller-supplied init.
+uint16_t jl_crc16(const uint8_t *data, uint32_t len, uint16_t crc) {
+    for (uint32_t i = 0; i < len; i++) {
+        crc ^= (uint16_t)data[i] << 8;
+        for (int b = 0; b < 8; b++) {
+            crc = (crc & 0x8000) ? (uint16_t)((crc << 1) ^ 0x1021) : (uint16_t)(crc << 1);
+        }
+    }
+    return crc;
+}
+
+// jl_crc_cipher with key 0xFFFFFFFF. The magic is a fixed 16-byte GB2312
+// string from the JieLi tools.
+static void jl_crc_cipher(uint8_t *buf, uint32_t len) {
+    static const uint8_t magic[16] = {
+        0xC3, 0xCF, 0xC0, 0xE8, 0xCE, 0xD2, 0xB0, 0xAE,
+        0xC4, 0xE3, 0xA3, 0xAC, 0xD3, 0xF1, 0xC1, 0xD6,
+    };
+    static const uint8_t key_hi[2] = {0xFF, 0xFF};
+    uint16_t crc = jl_crc16(key_hi, 2, 0xFFFF);
+    for (uint32_t i = 0; i < len; i++) {
+        crc = jl_crc16(&magic[i % 16], 1, crc);
+        buf[i] ^= (uint8_t)crc;
+    }
+}
+
+static void put_be32(uint8_t *p, uint32_t v) {
+    p[0] = (uint8_t)(v >> 24);
+    p[1] = (uint8_t)(v >> 16);
+    p[2] = (uint8_t)(v >> 8);
+    p[3] = (uint8_t)v;
+}
+
+// CDB = cmd (u16 BE) + args, padded with 0xFF to 16 bytes.
+static void make_cdb(uint8_t cdb[16], uint16_t cmd, const uint8_t *args, uint8_t nargs) {
+    memset(cdb, 0xFF, 16);
+    cdb[0] = (uint8_t)(cmd >> 8);
+    cdb[1] = (uint8_t)cmd;
+    memcpy(&cdb[2], args, nargs);
+}
+
+// cmd_exec: 16-byte data-IN, resp[0:2] echoes the command.
+static bool cmd_exec(uint16_t cmd, const uint8_t *args, uint8_t nargs) {
+    uint8_t cdb[16];
+    uint32_t got = 0;
+    make_cdb(cdb, cmd, args, nargs);
+    last_cmd_us = time_us_64();
+    if (!fm1_host_bot(cdb, 16, true, resp, sizeof(resp), &got)) {
+        dlog("JL: cmd %04X failed", cmd);
+        return false;
+    }
+    uint16_t echo = (uint16_t)(resp[0] << 8 | resp[1]);
+    if (echo != cmd) {
+        dlog("JL: cmd %04X answered as %04X", cmd, echo);
+        return false;
+    }
+    return true;
+}
+
+bool jl_ensure_loader(void) {
+    if (loader_running) return true;
+    if (!fm1_host_uboot_ready()) {
+        dlog("JL: no UBOOT mounted");
+        return false;
+    }
+#if !FM1T_HAVE_LOADER
+    dlog("JL: firmware built without wl82loader.bin (see FM1T_LOADER_BIN)");
+    return false;
+#else
+    dlog("JL: uploading wl82loader (%u bytes) to %08lX", (unsigned)sizeof(wl82loader),
+         (unsigned long)LOADER_ADDR);
+
+    // The blob is shipped already ciphered: send it raw, 512 bytes at a time.
+    for (uint32_t off = 0; off < sizeof(wl82loader); off += JL_IO_SIZE) {
+        uint16_t n = (uint16_t)((sizeof(wl82loader) - off) < JL_IO_SIZE
+                                    ? (sizeof(wl82loader) - off) : JL_IO_SIZE);
+        memcpy(block, &wl82loader[off], n);
+
+        uint8_t args[9];
+        put_be32(args, LOADER_ADDR + off);
+        args[4] = (uint8_t)(n >> 8);
+        args[5] = (uint8_t)n;
+        args[6] = 0x00;
+        uint16_t crc = jl_crc16(block, n, 0);
+        args[7] = (uint8_t)crc;          // LE
+        args[8] = (uint8_t)(crc >> 8);
+
+        uint8_t cdb[16];
+        make_cdb(cdb, CMD_WRITE_MEMORY, args, sizeof(args));
+        if (!fm1_host_bot(cdb, 16, false, block, n, NULL)) {
+            dlog("JL: loader block at +%lu failed", (unsigned long)off);
+            return false;
+        }
+    }
+
+    uint8_t args[6];
+    put_be32(args, LOADER_ADDR);
+    args[4] = (uint8_t)(LOADER_ARG >> 8);
+    args[5] = (uint8_t)LOADER_ARG;
+    if (!cmd_exec(CMD_JUMP, args, sizeof(args))) {
+        dlog("JL: jump to loader failed");
+        return false;
+    }
+
+    loader_running = true;
+    last_cmd_us = time_us_64();
+    dlog("JL: loader running");
+    return true;
+#endif
+}
+
+bool jl_info(jl_info_t *info) {
+    if (!jl_ensure_loader()) return false;
+
+    uint8_t args[4];
+    put_be32(args, 0x00AC6900);
+    if (!cmd_exec(CMD_READ_KEY, args, sizeof(args))) return false;
+    // payload = resp[2:]; key = cipher(reverse(payload[4:6])) as u16 LE
+    uint8_t k[2] = {resp[2 + 5], resp[2 + 4]};
+    jl_crc_cipher(k, 2);
+    info->chip_key = (uint16_t)(k[0] | k[1] << 8);
+
+    if (!cmd_exec(CMD_GET_ONLINE_DEVICE, NULL, 0)) return false;
+    const uint8_t *p = &resp[2];
+    info->dev_type = p[0];
+    info->flash_id = (uint32_t)p[2] | (uint32_t)p[3] << 8 | (uint32_t)p[4] << 16 |
+                     (uint32_t)p[5] << 24;
+    return true;
+}
+
+bool jl_flash_read(uint32_t addr, uint16_t len, uint8_t *buf) {
+    if (len > JL_IO_SIZE) return false;
+    if (!jl_ensure_loader()) return false;
+
+    uint8_t args[6];
+    put_be32(args, addr);
+    args[4] = (uint8_t)(len >> 8);
+    args[5] = (uint8_t)len;
+
+    uint8_t cdb[16];
+    uint32_t got = 0;
+    make_cdb(cdb, CMD_READ_FLASH, args, sizeof(args));
+    last_cmd_us = time_us_64();
+    if (!fm1_host_bot(cdb, 16, true, buf, len, &got) || got != len) {
+        dlog("JL: flash read %06lX+%u failed (got %lu)", (unsigned long)addr, len,
+             (unsigned long)got);
+        return false;
+    }
+    return true;
+}
+
+void jl_keepalive(void) {
+    if (!loader_running || !fm1_host_uboot_ready()) return;
+    if (time_us_64() - last_cmd_us < KEEPALIVE_MS * 1000ull) return;
+    if (!cmd_exec(CMD_GET_ONLINE_DEVICE, NULL, 0)) dlog("JL: keepalive failed");
+}

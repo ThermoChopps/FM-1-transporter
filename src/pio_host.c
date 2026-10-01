@@ -10,12 +10,14 @@
 #include "class/msc/msc.h"
 
 #include "log.h"
+#include "jieli_uboot.h"
 #include "recovery.h"
+#include "transporter_proto.h"
 
 #define HOST_RHPORT 1
 #define FM1_VID 0x4C4A
 #define FM1_PID 0x8057
-#define XFER_TIMEOUT_MS 700
+#define XFER_TIMEOUT_MS 2000
 #define FIRST_CBW_DELAY_MS 1500     // macOS had the device for seconds before its first CBW
 #define INQUIRY_RETRY_MS 300
 #define INQUIRY_TRIES 30
@@ -34,6 +36,9 @@ static volatile char pending_cmd;
 static uint64_t mount_us;
 static int inquiry_tries;       // > 0 while the post-mount INQUIRY loop is active
 static uint64_t next_inquiry_us;
+
+static bool bot_cmd(uint8_t daddr, const uint8_t *cdb, uint8_t cdb_len, bool in, void *buf,
+                    uint16_t len, uint32_t *got);
 
 static CFG_TUSB_MEM_ALIGN uint8_t cfg_buf[512];
 static CFG_TUSB_MEM_ALIGN uint8_t data_buf[512];
@@ -61,11 +66,26 @@ bool fm1_pio_host_mounted(void) {
     return mounted_addr != 0;
 }
 
+static bool uboot_ready;    // INQUIRY answered on the current mount
+
+bool fm1_host_bot(const uint8_t *cdb, uint8_t cdb_len, bool in, void *buf, uint16_t len,
+                  uint32_t *got) {
+    uint8_t daddr = mounted_addr;
+    if (!daddr || !uboot_ready) return false;
+    return bot_cmd(daddr, cdb, cdb_len, in, buf, len, got);
+}
+
+bool fm1_host_uboot_ready(void) {
+    return mounted_addr != 0 && uboot_ready;
+}
+
 void tuh_mount_cb(uint8_t daddr) {
     dlog("HOST: device mounted, addr=%u (%.1f ms after host start)", daddr,
          (time_us_64() - host_start_us) / 1000.0);
     mounted_addr = daddr;
     mount_us = time_us_64();
+    uboot_ready = false;
+    jl_reset();
     probe_pending = true;
 }
 
@@ -73,6 +93,7 @@ void tuh_umount_cb(uint8_t daddr) {
     dlog("HOST: device addr=%u detached (%.1f ms after mount)", daddr,
          (time_us_64() - mount_us) / 1000.0);
     mounted_addr = 0;
+    uboot_ready = false;
     probe_pending = false;
     inquiry_tries = 0;
     rgb(false, false, true);
@@ -158,9 +179,10 @@ static bool ctrl_sync(uint8_t daddr, uint8_t type, uint8_t req, uint16_t value, 
     return true;
 }
 
-// One Bulk-Only Transport command. len == 0 means no data stage.
-static bool bot_cmd(uint8_t daddr, const uint8_t *cdb, uint8_t cdb_len, bool in, uint16_t len,
-                    uint32_t *got) {
+// One Bulk-Only Transport command. len == 0 means no data stage. buf must be
+// word-aligned RAM.
+static bool bot_cmd(uint8_t daddr, const uint8_t *cdb, uint8_t cdb_len, bool in, void *buf,
+                    uint16_t len, uint32_t *got) {
     memset(&cbw, 0, sizeof(cbw));
     cbw.signature = MSC_CBW_SIGNATURE;
     cbw.tag = cbw_tag++;
@@ -174,7 +196,7 @@ static bool bot_cmd(uint8_t daddr, const uint8_t *cdb, uint8_t cdb_len, bool in,
         dlog("HOST: CBW not accepted");
         return false;
     }
-    if (len && !edpt_sync(daddr, in ? ep_in : ep_out, data_buf, len, got)) return false;
+    if (len && !edpt_sync(daddr, in ? ep_in : ep_out, buf, len, got)) return false;
     if (!edpt_sync(daddr, ep_in, &csw, sizeof(csw), NULL)) {
         dlog("HOST: no CSW");
         return false;
@@ -294,7 +316,7 @@ static bool probe_inquiry(uint8_t daddr) {
     static const uint8_t inquiry[6] = {0x12, 0, 0, 0, 36, 0};
     uint32_t got = 0;
 
-    if (!bot_cmd(daddr, inquiry, sizeof(inquiry), true, 36, &got) || got < 36) {
+    if (!bot_cmd(daddr, inquiry, sizeof(inquiry), true, data_buf, 36, &got) || got < 36) {
         dlog("INQUIRY failed (got %lu bytes)", (unsigned long)got);
         return false;
     }
@@ -335,7 +357,7 @@ static void run_command(uint8_t daddr, char c) {
         probe_inquiry(daddr);
         break;
     case 'u':
-        dlog("TEST UNIT READY: %s", bot_cmd(daddr, tur, sizeof(tur), true, 0, NULL) ? "OK" : "failed");
+        dlog("TEST UNIT READY: %s", bot_cmd(daddr, tur, sizeof(tur), true, NULL, 0, NULL) ? "OK" : "failed");
         break;
     case 'c':
         dlog("SET_CONFIGURATION 1: %s",
@@ -407,6 +429,7 @@ void fm1_pio_host_task(void) {
              (time_us_64() - mount_us) / 1000.0);
         if (probe_inquiry(daddr)) {
             inquiry_tries = 0;
+            uboot_ready = true;
             rgb(false, true, false);
             dlog("M0 DONE: UBOOT enumerated and answered INQUIRY via the PIO host.");
         } else if (!mounted_addr) {
@@ -418,6 +441,8 @@ void fm1_pio_host_task(void) {
             next_inquiry_us = time_us_64() + INQUIRY_RETRY_MS * 1000ull;
         }
     }
+
+    fm1_proto_poll();
 
     char c = pending_cmd;
     if (c) {

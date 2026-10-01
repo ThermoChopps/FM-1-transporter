@@ -5,3 +5,4 @@ build/
 *.elf
 *.bin
 *.map
+__pycache__/

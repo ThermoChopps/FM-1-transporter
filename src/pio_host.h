@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stdint.h>
 
 // FM-1-facing PIO USB host (TinyUSB rhport 1, Pico-PIO-USB on PIO1,
 // GP0 = D+, GP1 = D-). Runs entirely on core 1, after recovery.
@@ -17,6 +18,14 @@ void fm1_pio_host_start(void);
 void fm1_pio_host_task(void);
 
 bool fm1_pio_host_mounted(void);
+
+// True once the mounted device answered INQUIRY as the JieLi UBOOT.
+bool fm1_host_uboot_ready(void);
+
+// One Bulk-Only Transport command to the mounted UBOOT (core 1 only).
+// buf must be word-aligned RAM; len == 0 means no data stage.
+bool fm1_host_bot(const uint8_t *cdb, uint8_t cdb_len, bool in, void *buf, uint16_t len,
+                  uint32_t *got);
 
 // Queues a one-letter console command for core 1 (safe to call from core 0).
 void fm1_pio_host_command(char c);

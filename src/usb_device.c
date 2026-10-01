@@ -1,6 +1,8 @@
 // Mac-facing USB device on the RP2040 native controller (rhport 0):
-// one CDC console plus the Raspberry Pi reset interface, so `picotool -f`
-// and a 1200 baud touch still reboot the board into BOOTSEL.
+//   CDC 0: log console (src/log.c, one-letter diagnostics)
+//   CDC 1: fm1t data channel (src/transporter_proto.c)
+//   Raspberry Pi reset interface, so `picotool -f` and a 1200 baud touch on
+//   the console still reboot the board into BOOTSEL.
 
 #include "pico/bootrom.h"
 #include "pico/unique_id.h"
@@ -13,17 +15,14 @@
 #define USBD_PID 0x000A     // Pico SDK CDC (RP2040), what picotool expects
 
 #define TUD_RPI_RESET_DESC_LEN 9
-#define USBD_DESC_LEN (TUD_CONFIG_DESC_LEN + TUD_CDC_DESC_LEN + TUD_RPI_RESET_DESC_LEN)
+#define USBD_DESC_LEN (TUD_CONFIG_DESC_LEN + 2 * TUD_CDC_DESC_LEN + TUD_RPI_RESET_DESC_LEN)
 
-#define USBD_ITF_CDC 0      // two interfaces
-#define USBD_ITF_RESET 2
-#define USBD_ITF_MAX 3
+#define USBD_ITF_CDC0 0     // two interfaces each
+#define USBD_ITF_CDC1 2
+#define USBD_ITF_RESET 4
+#define USBD_ITF_MAX 5
 
-#define USBD_CDC_EP_CMD 0x81
-#define USBD_CDC_EP_OUT 0x02
-#define USBD_CDC_EP_IN 0x82
-
-enum { STR_LANG, STR_MANUF, STR_PRODUCT, STR_SERIAL, STR_CDC, STR_RESET, STR_COUNT };
+enum { STR_LANG, STR_MANUF, STR_PRODUCT, STR_SERIAL, STR_CDC0, STR_CDC1, STR_RESET, STR_COUNT };
 
 static const tusb_desc_device_t desc_device = {
     .bLength = sizeof(tusb_desc_device_t),
@@ -44,8 +43,8 @@ static const tusb_desc_device_t desc_device = {
 
 static const uint8_t desc_cfg[USBD_DESC_LEN] = {
     TUD_CONFIG_DESCRIPTOR(1, USBD_ITF_MAX, 0, USBD_DESC_LEN, 0, 100),
-    TUD_CDC_DESCRIPTOR(USBD_ITF_CDC, STR_CDC, USBD_CDC_EP_CMD, 8,
-                       USBD_CDC_EP_OUT, USBD_CDC_EP_IN, 64),
+    TUD_CDC_DESCRIPTOR(USBD_ITF_CDC0, STR_CDC0, 0x81, 8, 0x02, 0x82, 64),
+    TUD_CDC_DESCRIPTOR(USBD_ITF_CDC1, STR_CDC1, 0x83, 8, 0x04, 0x84, 64),
     9, TUSB_DESC_INTERFACE, USBD_ITF_RESET, 0, 0, TUSB_CLASS_VENDOR_SPECIFIC,
     RESET_INTERFACE_SUBCLASS, RESET_INTERFACE_PROTOCOL, STR_RESET,
 };
@@ -56,7 +55,8 @@ static const char *const desc_str[STR_COUNT] = {
     [STR_MANUF] = "kurogedelic",
     [STR_PRODUCT] = "FM-1 Transporter",
     [STR_SERIAL] = serial_str,
-    [STR_CDC] = "FM-1 Transporter console",
+    [STR_CDC0] = "FM-1 Transporter console",
+    [STR_CDC1] = "FM-1 Transporter data",
     [STR_RESET] = "Reset",
 };
 
@@ -152,6 +152,5 @@ usbd_class_driver_t const *usbd_app_driver_get_cb(uint8_t *driver_count) {
 }
 
 void tud_cdc_line_coding_cb(uint8_t itf, cdc_line_coding_t const *coding) {
-    (void)itf;
-    if (coding->bit_rate == 1200) rom_reset_usb_boot_extra(-1, 0, false);
+    if (itf == 0 && coding->bit_rate == 1200) rom_reset_usb_boot_extra(-1, 0, false);
 }
