@@ -1,6 +1,13 @@
-# M0 bring-up checklist
+# Development log
 
-**Status: M0 passed on hardware, 2026-10-01.** XIAO RP2040 at 120 MHz, 3 wires, no VBUS. Log: [logs/m0_success_2026-10-01.log](logs/m0_success_2026-10-01.log).
+Bring-up history and the hardware results behind the README, kept for
+reference. The milestones are M0 (UBOOT enumeration), M1 (read-only loader
+and dump), and M2 (soft key and writes). The log lines quoted here are from
+the firmware of that time; for example, "M0 DONE" is now "UBOOT READY".
+
+## M0: UBOOT through the PIO USB host
+
+**Passed on hardware, 2026-10-01.** XIAO RP2040 at 120 MHz, 3 wires, no VBUS. Log: [logs/m0_success_2026-10-01.log](logs/m0_success_2026-10-01.log).
 
 ```
 ACK after 64724 packets -> 6000 ms of pulses (D+ held) -> HANDOFF in 1076 us
@@ -14,7 +21,7 @@ Lessons from the first attempts:
 
 - `CFG_TUH_API_EDPT_XFER` must be 1. Without it, TinyUSB silently drops the completion of raw `tuh_edpt_xfer()` transfers. The CBW looked NAKed, the retries put the BOT state machine out of sync, and the ROM detached after about 4-5 s.
 - Stock V15 attaches to USB without VBUS (`4C4A:C755`, 293-byte config). Use it to test the host side without the key path.
-- If the FM-1 is already running V15 when the XIAO boots, recovery mistakes V15's D+ pull-up for the ROM. Switch the FM-1 off before resetting the XIAO.
+- If the FM-1 is already running V15 when the XIAO boots, the M0-era recovery mistook V15's D+ pull-up for the ROM. The firmware now detects an attached target at boot and skips the key.
 
 The objective is one automatic transition:
 
@@ -24,7 +31,7 @@ USB_KEY -> ROM holds D+ under 1 ms pulses -> PIO USB Host -> UBOOT descriptor
 
 No memory or flash commands in M0. The only class request is a read-only SCSI INQUIRY.
 
-Protocol and hardware findings: [JIELI_UBOOT_PROTOCOL.md](JIELI_UBOOT_PROTOCOL.md).
+Protocol and hardware findings: [PROTOCOL.md](PROTOCOL.md).
 
 ## Build
 

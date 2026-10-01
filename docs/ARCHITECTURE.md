@@ -1,125 +1,74 @@
-# FM-1 Transporter architecture
+# Architecture
 
-## Design rule
-
-Do not change the already-working JieLi USB_KEY sequence while bringing up the USB host. The ROM never releases D+ while pulses arrive, and gives up if they stop before a host takes over, so the host starts while the ROM is still holding D+ (see docs/M0_BRINGUP.md, "Handoff rule").
-
-## Target state machine
+## Data flow
 
 ```
-WAIT_TARGET_POWER
-      |
-      v
-SEND_USB_KEY
-      |
-      v
-WAIT_ACK
-      |
-      v
-WAIT_DP_PULLUP
-      |
-      v
-ROM_KEEPALIVE_PULSES   (until D+ held high for HANDOFF_PULSE_MS; pulses keep running)
-      |
-      v
-RELEASE_TARGET_BUS     (immediately followed by host start)
-      |
-      v
-PIO_USB_HOST_START
-      |
-      v
-USB_ENUMERATION
-      |
-      v
-UBOOT_READY
+Mac ── native USB (CDC 0: console, CDC 1: fm1t data) ──► XIAO RP2040
+                                                            │ GP0 = D+, GP1 = D-, GND
+                                                            ▼
+                                                   M-VAVE FM-1 (JieLi WL82)
+                                                   mask ROM UBOOT1.00 → wl82loader → SPI flash
 ```
 
-On any failure before `UBOOT_READY`, the target pins must return to high impedance before retrying.
+## Cores and peripherals
 
-## Pin ownership
+| | role |
+|---|---|
+| core 0 | TinyUSB device on the native port: console, fm1t data channel, RPi reset interface; drains both output rings |
+| core 1 | USB_KEY recovery (PIO0), then the TinyUSB host on Pico-PIO-USB (PIO1), the UBOOT/loader protocol and fm1t requests |
+| PIO0 | USB_KEY sender and 1 ms keep-alive pulses (`pio/usb_key.pio`) |
+| PIO1 | Pico-PIO-USB host, `pin_dp = 0` |
+| clk_sys | 120 MHz (Pico-PIO-USB needs a multiple of 12 MHz) |
 
-### Recovery phase
+GP0/GP1 have one owner at a time, and both owners run on core 1, so the
+recovery → host handoff is one call sequence (about 1 ms).
 
-PIO0 owns GP0/GP1 only while a USB_KEY packet or calibration pulse is actively being generated.
-
-### Handoff
-
-The handoff must be explicit:
-
-1. Disable the USB_KEY state machine.
-2. Disable the keep-alive pulse state machine.
-3. Return GP0/GP1 to SIO and clear the pad overrides.
-4. Set both pins to input/high-impedance.
-5. Initialize Pico-PIO-USB on PIO1 at once. There is no guard delay, because the ROM is waiting.
-6. Start TinyUSB host on rhport 1.
-
-Recovery and host both run on core 1, so this is one call sequence.
-
-Never allow the recovery PIO and USB host PIO to drive GP0/GP1 simultaneously.
-
-## USB roles
+## Boot sequence (core 1)
 
 ```
-RP2040 native USB controller
-  role: USB device
-  peer: Mac
-  purpose: control / logs / future fm1t protocol
-
-RP2040 PIO USB controller
-  role: USB host
-  peer: FM-1 JieLi ROM/UBOOT
-  purpose: enumeration and UBOOT transport
+D+ already pulled up? ── yes ──► 6 s of 1 ms pulses ─┐   (FM-1 app or a waiting UBOOT)
+        │ no                                          │
+        ▼                                             │
+USB_KEY 0x16EF (polarity A) until ACK                 │
+        ▼                                             │
+1 ms pulses until D+ drops after ≥1 s, or 6 s ────────┤
+                                                      ▼
+                         release GP0/GP1 → start PIO USB host
+                                                      ▼
+            4C4A:8057 UBOOT → INQUIRY → ready for fm1t
+            4C4A:C755 stock V15 → fm1t sends the USB-MIDI soft key → UBOOT
 ```
 
-Pico-PIO-USB requires one PIO block, three state machines, two adjacent GPIO pins, and a 1 ms repeating timer in host mode. GP0=D+ and GP1=D- satisfy its adjacent-pin convention.
+If D+ is pulled up but nothing enumerates for 3 s, the transporter reboots
+itself (at most 3 times in a row). `rekey` reboots into forced USB_KEY mode:
+it waits for D+ to drop, then keys.
 
-The RP2040 system clock must be selected to satisfy Pico-PIO-USB timing; 120 MHz is the initial target.
+## Why the pulses matter
 
-## Bring-up gates
+After the key, the ROM trims its clock from the 1 ms edges. If they stop too
+early, it gives up and boots flash. Stock V15 also fails its first SETUP
+without them. The PIO pulse train is cycle-exact; the host's SOFs come from
+a timer IRQ.
 
-### Gate A - recovery regression
+## Safety boundaries
 
-The imported USB_KEY implementation must still reach ROM calibration complete on the existing three-wire prototype.
+- Writes exist only as whole 4 KiB sectors in `[0x4000, 0x93000)`. The firmware
+  refuses anything else whatever the host asks (`src/jieli_uboot.c`).
+- No block/chip erase and no chip-key write are implemented.
+- Package review, reference checks and the final verify are done in
+  `tools/fm1t.py`, using fm-1-research-lab's `fm1_ota.require_reviewed`.
 
-### Gate B - electrical handoff
-
-After calibration, both GP0/GP1 must remain released until the PIO host takes ownership.
-
-### Gate C - host attach
-
-TinyUSB must call `tuh_mount_cb()` for the FM-1.
-
-### Gate D - descriptor
-
-Read and log the device descriptor and configuration descriptor. Do not implement writes yet.
-
-### Gate E - MSC/SCSI
-
-After the actual UBOOT interface is confirmed, implement only the required MSC/SCSI transport used by the JieLi UBOOT protocol.
-
-### Gate F - read-only UBOOT
-
-Implement `info` and flash dump before erase/write.
-
-### Gate G - guarded writes
-
-Add erase/write/verify only after readback is reliable. Preserve the stock SPL/UBOOT region by policy; initial CFW work targets the application area only.
-
-## Source layout
+## Source map
 
 ```
-src/
-  main.c              core split, recovery -> host handoff
-  recovery.c          USB_KEY + keep-alive pulses, GP0/GP1 release
-  pio_host.c          Pico-PIO-USB / TinyUSB host, descriptors, BOT
-  usb_device.c        Mac-facing CDC + reset interface descriptors
-  log.c               cross-core log ring buffer -> CDC
-  tusb_config.h
-  (planned) jieli_uboot.c       UBOOT protocol
-  (planned) transporter_proto.c Mac-facing command protocol
-
-pio/
-  usb_key.pio
-lib/
-  Pico-PIO-USB        submodule, 0.6.1
+src/main.c              core split, boot sequence, rekey
+src/recovery.c          USB_KEY, pulses, GP0/GP1 release
+src/pio_host.c          TinyUSB host, descriptors, BOT, soft key, console diagnostics
+src/jieli_uboot.c       UBOOT1.00 + LoaderV2: loader upload, info, read, guarded sector write
+src/transporter_proto.c fm1t line protocol on CDC 1
+src/usb_device.c        native USB descriptors, reset interface
+src/log.c               cross-core log ring → CDC 0
+pio/usb_key.pio         key sender and pulse generator
+lib/Pico-PIO-USB        submodule (0.6.1) + lib/pico-pio-usb-bulk-multi-xact.patch
+tools/fm1t.py           Mac-side client
 ```

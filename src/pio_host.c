@@ -478,12 +478,12 @@ void fm1_pio_host_task(void) {
             inquiry_tries = 0;
             uboot_ready = true;
             rgb(false, true, false);
-            dlog("M0 DONE: UBOOT enumerated and answered INQUIRY via the PIO host.");
+            dlog("UBOOT READY: enumerated and answered INQUIRY via the PIO host.");
         } else if (!mounted_addr) {
             // detached mid-attempt; tuh_umount_cb already stopped the loop
         } else if (inquiry_tries == 0) {
             rgb(true, false, false);
-            dlog("M0: INQUIRY never accepted. Type h on the console for diagnostics.");
+            dlog("UBOOT: INQUIRY never accepted. Type h on the console for diagnostics.");
         } else {
             next_inquiry_us = time_us_64() + INQUIRY_RETRY_MS * 1000ull;
         }

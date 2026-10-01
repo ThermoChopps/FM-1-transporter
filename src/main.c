@@ -1,4 +1,4 @@
-// FM-1 Transporter - M0: automatic UBOOT enumeration
+// FM-1 Transporter - USB_KEY recovery + PIO USB host for the JieLi UBOOT
 // Seeed XIAO RP2040: GP0/D6 -> FM-1 D+, GP1/D7 -> FM-1 D-, GND -> GND.
 // FM-1 VBUS is not connected in the current battery-powered prototype.
 //
@@ -41,7 +41,7 @@ static void core1_main(void) {
     }
     sleep_ms(200);
 
-    printf("\nFM-1 Transporter M0\n");
+    printf("\nFM-1 Transporter\n");
     printf("XIAO RP2040: D+=GP0/D6 D-=GP1/D7, PIO host on PIO1\n");
     printf("If the FM-1 runs stock V15, leave it on: fm1t enters UBOOT via the soft key.\n");
     printf("Otherwise switch it OFF, and ON again once the key is running.\n");

@@ -4,7 +4,7 @@
 #include <stdint.h>
 
 // JieLi WL82 UBOOT1.00 + wl82loader (LoaderV2), read-only subset.
-// See docs/JIELI_UBOOT_PROTOCOL.md. Core 1 only.
+// See docs/PROTOCOL.md. Core 1 only.
 //
 // Writes are limited to whole 4 KiB sectors inside the application area
 // [JL_WRITE_MIN, JL_WRITE_END). Header/SPL/isd_config below 0x4000 and the
