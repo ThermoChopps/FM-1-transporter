@@ -27,10 +27,13 @@
 #define CMD_READ_FLASH 0xFD05
 #define CMD_READ_KEY 0xFC09
 #define CMD_GET_ONLINE_DEVICE 0xFC0A
+#define CMD_GET_USB_BUFF_SIZE 0xFC14
+#define CMD_RUN_APP 0xFC0C
 
 #define KEEPALIVE_MS 1000   // the loader resets the chip after ~3 s without a command
 
 static bool loader_running;
+static uint16_t read_chunk = JL_IO_SIZE;
 static uint64_t last_cmd_us;
 
 static uint8_t __attribute__((aligned(4))) resp[16];
@@ -38,6 +41,7 @@ static uint8_t __attribute__((aligned(4))) block[JL_IO_SIZE];
 
 void jl_reset(void) {
     loader_running = false;
+    read_chunk = JL_IO_SIZE;
 }
 
 bool jl_have_loader(void) {
@@ -155,8 +159,23 @@ bool jl_ensure_loader(void) {
     loader_running = true;
     last_cmd_us = time_us_64();
     dlog("JL: loader running");
+
+    // Read-only query; falls back to 512-byte reads if unsupported.
+    if (cmd_exec(CMD_GET_USB_BUFF_SIZE, NULL, 0)) {
+        uint32_t size = (uint32_t)resp[2] << 24 | (uint32_t)resp[3] << 16 |
+                        (uint32_t)resp[4] << 8 | resp[5];
+        uint32_t chunk = size > JL_READ_MAX ? JL_READ_MAX : size;
+        chunk -= chunk % JL_IO_SIZE;
+        if (chunk >= JL_IO_SIZE) read_chunk = (uint16_t)chunk;
+        dlog("JL: loader USB buffer %lu bytes, reading %u at a time", (unsigned long)size,
+             read_chunk);
+    }
     return true;
 #endif
+}
+
+uint16_t jl_read_chunk(void) {
+    return read_chunk;
 }
 
 bool jl_info(jl_info_t *info) {
@@ -179,7 +198,7 @@ bool jl_info(jl_info_t *info) {
 }
 
 bool jl_flash_read(uint32_t addr, uint16_t len, uint8_t *buf) {
-    if (len > JL_IO_SIZE) return false;
+    if (len > JL_READ_MAX) return false;
     if (!jl_ensure_loader()) return false;
 
     uint8_t args[6];
@@ -240,6 +259,17 @@ bool jl_flash_write_sector(uint32_t addr, const uint8_t *data) {
             return false;
         }
     }
+    return true;
+}
+
+bool jl_run_app(void) {
+    if (!loader_running) return false;
+    uint8_t args[4];
+    put_be32(args, 1);
+    dlog("JL: RUN_APP - the FM-1 leaves UBOOT and boots its firmware");
+    // The chip may reset before it answers; either way the loader is gone.
+    cmd_exec(CMD_RUN_APP, args, sizeof(args));
+    loader_running = false;
     return true;
 }
 

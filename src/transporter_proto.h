@@ -9,6 +9,7 @@
 //   status                -> OK uboot=<0|1> v15=<0|1> loader=<0|1>
 //   uboot                 -> OK uboot | OK softkey | ERR no-v15
 //                            (soft key: stock V15 -> mask ROM UBOOT1.00)
+//   runapp                -> OK | ERR no-loader  (loader RUN_APP: boot firmware)
 //   rekey                 -> OK rekey, then the transporter reboots into
 //                            USB_KEY mode (for a unit stuck with USB up)
 //   info                  -> OK key=980F type=3 id=856014 | ERR <why>

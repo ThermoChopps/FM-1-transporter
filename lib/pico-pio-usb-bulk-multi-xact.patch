@@ -31,16 +31,16 @@ diff -ru a/src/pio_usb_host.c b/src/pio_usb_host.c
 -              usb_out_transaction(pp, ep);
 +            bool const is_bulk = ((ep->attr & 0x03) == EP_ATTR_BULK);
 +            for (;;) {
-+              uint16_t const before = ep->actual_len;
 +              if (ep->ep_num & EP_IN) {
 +                usb_in_transaction(pp, ep);
 +              } else {
 +                usb_out_transaction(pp, ep);
 +              }
-+              // Bulk only: continue while the endpoint makes progress and the
-+              // frame has time left. A NAK or error leaves actual_len alone.
++              // Bulk only: keep going, NAKs included, while the frame has
++              // time left. Devices such as the JieLi loader NAK briefly while
++              // refilling their FIFO; a hardware host retries at once too.
++              // Completion, STALL and errors clear has_transfer.
 +              if (!is_bulk || !ep->has_transfer || ep->transfer_aborted ||
-+                  ep->actual_len == before ||
 +                  time_us_32() - frame_start_us > PIO_USB_BULK_FRAME_BUDGET_US) {
 +                break;
 +              }

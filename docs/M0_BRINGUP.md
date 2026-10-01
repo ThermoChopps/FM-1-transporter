@@ -136,6 +136,9 @@ Hardware check of the write path: `fm1t.py selftest-write --sector 0x92000 --wri
 
 Known limits:
 
-- Dumps run at 64 KiB/s. `lib/pico-pio-usb-bulk-multi-xact.patch` lets bulk transfers use more of each frame, which gained only ~30%, so the bottleneck is elsewhere.
-- If V15 boots while the transporter is already pulsing or hosting, for example after the loader watchdog fires, V15 may not attach. Reboot the transporter with V15 running, or power-cycle the FM-1 while the key runs.
+- Dumps now run at 307 KiB/s (1 MiB in 3.3 s, up from 20.7 s), for two reasons:
+  - READ_FLASH uses the loader's USB buffer size, capped at 4 KiB. GET_USB_BUFF_SIZE reports 32768.
+  - `lib/pico-pio-usb-bulk-multi-xact.patch` lets bulk endpoints keep transacting within a frame, NAK retries included. The loader NAKs briefly between packets while it refills its FIFO.
+- Stock V15 enables USB only after a cold power-on. After a warm start (loader `RUN_APP`, or the loader watchdog reset) it runs normally but never attaches. The soft key therefore works when the FM-1 was powered on and attached before the transporter started. After a transporter session, power-cycle the FM-1 to use it over USB again.
+- If something pulls D+ up but never enumerates (seen once with V15 coming up under a running host), the transporter reboots itself, pulses, and hosts again. It does this at most 3 times in a row.
 - No USB-only reset exists. A bricked unit needs one power-on. See fm-1-research-lab for PB01 long-press reset and the watchdog-first CFW plan.

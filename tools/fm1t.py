@@ -4,6 +4,7 @@
     fm1t.py status
     fm1t.py uboot          (stock V15 -> UBOOT via the USB-MIDI soft key)
     fm1t.py rekey          (reboot the transporter into USB_KEY mode)
+    fm1t.py runapp         (leave UBOOT and boot the installed firmware)
     fm1t.py info
     fm1t.py dump out.bin [--addr 0] [--len 0x100000] [--compare ref.bin]
     fm1t.py write --package FM-1_vNN.fwsc --ref earlier-dump.bin [--write]
@@ -104,6 +105,10 @@ def cmd_status(s, _):
 
 def cmd_uboot(s, _):
     ensure_uboot(s)
+
+
+def cmd_runapp(s, _):
+    print(request(s, "runapp"))
 
 
 def cmd_rekey(s, _):
@@ -329,6 +334,7 @@ def main():
     sub.add_parser("status")
     sub.add_parser("uboot")
     sub.add_parser("rekey")
+    sub.add_parser("runapp")
     sub.add_parser("info")
     d = sub.add_parser("dump")
     d.add_argument("out")
@@ -346,7 +352,7 @@ def main():
     args = ap.parse_args()
 
     s = find_port(args.port)
-    {"status": cmd_status, "uboot": cmd_uboot, "rekey": cmd_rekey, "info": cmd_info, "dump": cmd_dump, "write": cmd_write,
+    {"status": cmd_status, "uboot": cmd_uboot, "rekey": cmd_rekey, "runapp": cmd_runapp, "info": cmd_info, "dump": cmd_dump, "write": cmd_write,
      "selftest-write": cmd_selftest_write}[args.cmd](s, args)
 
 

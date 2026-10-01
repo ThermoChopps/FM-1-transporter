@@ -15,7 +15,8 @@
 #define JL_CHIP_KEY 0x980F
 #define JL_FLASH_ID 0x856014
 #define JL_FLASH_SIZE (1024u * 1024u)
-#define JL_IO_SIZE 512
+#define JL_IO_SIZE 512          // loader upload and flash write chunk
+#define JL_READ_MAX 4096        // largest READ_FLASH we issue (see jl_read_chunk)
 #define JL_SECTOR_SIZE 0x1000
 #define JL_WRITE_MIN 0x4000
 #define JL_WRITE_END 0x93000
@@ -37,13 +38,22 @@ bool jl_ensure_loader(void);
 
 bool jl_info(jl_info_t *info);
 
-// Reads len (<= JL_IO_SIZE) bytes of SPI flash at addr into buf.
+// READ_FLASH size to use: the loader's USB buffer size (GET_USB_BUFF_SIZE),
+// clamped to [JL_IO_SIZE, JL_READ_MAX] in 512-byte steps. Each Bulk-Only
+// command costs at least three 1 ms frames on the PIO host (CBW, data, CSW),
+// so larger reads are what make dumps faster.
+uint16_t jl_read_chunk(void);
+
+// Reads len (<= JL_READ_MAX) bytes of SPI flash at addr into buf.
 // buf must be word-aligned RAM.
 bool jl_flash_read(uint32_t addr, uint16_t len, uint8_t *buf);
 
 // Erases one 4 KiB sector, writes it and reads it back. Returns false (and
 // touches nothing) if addr is outside the writable area or misaligned.
 bool jl_flash_write_sector(uint32_t addr, const uint8_t *data);
+
+// LoaderV2 RUN_APP: leave UBOOT and boot the installed firmware. No write.
+bool jl_run_app(void);
 
 // Sends a harmless GET_ONLINE_DEVICE if the loader has been idle for 1 s.
 // The loader resets the chip after ~3 s without a command.

@@ -5,6 +5,8 @@
 
 #include "pico/stdlib.h"
 #include "hardware/dma.h"
+#include "hardware/gpio.h"
+#include "hardware/watchdog.h"
 #include "pio_usb.h"
 #include "tusb.h"
 #include "class/msc/msc.h"
@@ -23,6 +25,12 @@
 #define INQUIRY_RETRY_MS 300
 #define INQUIRY_TRIES 30
 #define ATTACH_STATUS_MS 2000
+// A target that pulls D+ up but never enumerates (V15 or a fresh UBOOT that
+// booted under the running host, without the 1 ms pulses) is recovered by
+// rebooting the transporter, which pulses first and then hosts again.
+#define REATTACH_AFTER_MS 3000
+#define REATTACH_MAX 3              // consecutive reboots without a mount
+#define REATTACH_SCRATCH 1          // watchdog scratch register for the count
 
 static volatile uint8_t mounted_addr;
 static volatile bool probe_pending;
@@ -36,6 +44,7 @@ static bool mounted_is_v15;
 static uint32_t cbw_tag = 1;
 static volatile char pending_cmd;
 static uint64_t mount_us;
+static uint64_t unmounted_since_us;
 static int inquiry_tries;       // > 0 while the post-mount INQUIRY loop is active
 static uint64_t next_inquiry_us;
 
@@ -61,7 +70,7 @@ void fm1_pio_host_start(void) {
     tuh_configure(HOST_RHPORT, TUH_CFGID_RPI_PIO_USB_CONFIGURATION, &cfg);
     tuh_init(HOST_RHPORT);
 
-    host_start_us = last_status_us = time_us_64();
+    host_start_us = last_status_us = unmounted_since_us = time_us_64();
 }
 
 bool fm1_pio_host_mounted(void) {
@@ -112,6 +121,7 @@ void tuh_mount_cb(uint8_t daddr) {
          (time_us_64() - host_start_us) / 1000.0);
     mounted_addr = daddr;
     mount_us = time_us_64();
+    watchdog_hw->scratch[REATTACH_SCRATCH] = 0;
     uboot_ready = false;
     jl_reset();
     probe_pending = true;
@@ -123,6 +133,7 @@ void tuh_umount_cb(uint8_t daddr) {
     mounted_addr = 0;
     uboot_ready = false;
     mounted_is_v15 = false;
+    unmounted_since_us = time_us_64();
     probe_pending = false;
     inquiry_tries = 0;
     rgb(false, false, true);
@@ -489,6 +500,28 @@ void fm1_pio_host_task(void) {
         } else {
             dlog("> %c ignored: no UBOOT mounted", c);
         }
+    }
+
+    if (!daddr && now - unmounted_since_us > REATTACH_AFTER_MS * 1000ull) {
+        // Pico-PIO-USB inverts the pad input (GPIO_OVERRIDE_INVERT), so a
+        // pulled-up D+ reads as 0 here. With nothing mounted there is no bus
+        // traffic, so the level is steady.
+        bool pulled_up = true;
+        for (int i = 0; i < 20 && pulled_up; i++) {
+            pulled_up = !gpio_get(PIN_DP);
+            busy_wait_us_32(100);
+        }
+        uint32_t n = watchdog_hw->scratch[REATTACH_SCRATCH];
+        if (pulled_up && n < REATTACH_MAX) {
+            watchdog_hw->scratch[REATTACH_SCRATCH] = n + 1;
+            dlog("HOST: D+ pulled up but nothing enumerated for %d ms - rebooting the "
+                 "transporter to pulse and re-host (%lu/%d)", REATTACH_AFTER_MS,
+                 (unsigned long)(n + 1), REATTACH_MAX);
+            sleep_ms(100);      // let core 0 flush the log
+            watchdog_reboot(0, 0, 10);
+            for (;;) tight_loop_contents();
+        }
+        unmounted_since_us = now;   // re-check after another interval
     }
 
     if (!daddr && now - last_status_us > ATTACH_STATUS_MS * 1000ull) {

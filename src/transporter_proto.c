@@ -32,7 +32,7 @@ static uint8_t tx[TX_SIZE];
 static volatile uint32_t tx_head;   // core 1
 static volatile uint32_t tx_tail;   // core 0
 
-static uint8_t __attribute__((aligned(4))) io[JL_IO_SIZE];
+static uint8_t __attribute__((aligned(4))) io[JL_READ_MAX];
 
 //--------------------------------------------------------------------+
 // core 0
@@ -185,8 +185,9 @@ static void do_read(uint32_t addr, uint32_t len) {
     tx_line("DATA %lu", (unsigned long)len);
 
     uint32_t crc = 0;
-    for (uint32_t off = 0; off < len; off += JL_IO_SIZE) {
-        uint16_t n = (uint16_t)((len - off) < JL_IO_SIZE ? (len - off) : JL_IO_SIZE);
+    uint32_t chunk = jl_read_chunk();
+    for (uint32_t off = 0; off < len; off += chunk) {
+        uint16_t n = (uint16_t)((len - off) < chunk ? (len - off) : chunk);
         bool ok = false;
         for (int attempt = 0; attempt < 3 && !ok; attempt++) {
             ok = jl_flash_read(addr + off, n, io);
@@ -196,8 +197,8 @@ static void do_read(uint32_t addr, uint32_t len) {
             // Pad with zeros and report the failure in END.
             memset(io, 0, n);
             tx_bytes(io, n);
-            for (off += n; off < len; off += JL_IO_SIZE) {
-                uint32_t m = (len - off) < JL_IO_SIZE ? (len - off) : JL_IO_SIZE;
+            for (off += n; off < len; off += chunk) {
+                uint32_t m = (len - off) < chunk ? (len - off) : chunk;
                 tx_bytes(io, m);
             }
             tx_line("END FAIL");
@@ -258,6 +259,8 @@ void fm1_proto_poll(void) {
         } else {
             do_read(strtoul(argv[1], NULL, 0), strtoul(argv[2], NULL, 0));
         }
+    } else if (!strcmp(argv[0], "runapp")) {
+        tx_line(jl_run_app() ? "OK" : "ERR no-loader");
     } else if (!strcmp(argv[0], "wsec") && argc == 3) {
         if (!fm1_host_uboot_ready()) {
             tx_line("ERR no-uboot");
