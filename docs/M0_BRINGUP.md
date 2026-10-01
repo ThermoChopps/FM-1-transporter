@@ -141,4 +141,17 @@ Known limits:
   - `lib/pico-pio-usb-bulk-multi-xact.patch` lets bulk endpoints keep transacting within a frame, NAK retries included. The loader NAKs briefly between packets while it refills its FIFO.
 - Stock V15 enables USB only after a cold power-on. After a warm start (loader `RUN_APP`, or the loader watchdog reset) it runs normally but never attaches. The soft key therefore works when the FM-1 was powered on and attached before the transporter started. After a transporter session, power-cycle the FM-1 to use it over USB again.
 - If something pulls D+ up but never enumerates (seen once with V15 coming up under a running host), the transporter reboots itself, pulses, and hosts again. It does this at most 3 times in a row.
-- No USB-only reset exists. A bricked unit needs one power-on. See fm-1-research-lab for PB01 long-press reset and the watchdog-first CFW plan.
+- No USB-only reset exists. The FM-1's only external reset is the PB01 8 s long press from isd_config, which needs a wire.
+
+## Watchdog reset → USB_KEY works (2026-10-01)
+
+The mask ROM accepts the USB_KEY after a watchdog reset, not only after a cold power-on. Test, with no power cycle and log [logs/watchdog_rekey_2026-10-01.log](logs/watchdog_rekey_2026-10-01.log):
+
+1. With the loader running, `fm1t.py rekey` reboots the transporter into forced-key mode, which stops the keepalive.
+2. The transporter waits for D+ to drop. The loader's idle watchdog fired 2.3 s later.
+3. Keying started at once. ACK came after 10 packets (about 5 ms).
+4. 6 s of pulses, then `4C4A:8057` mounted, INQUIRY OK, and the loader info OK again.
+
+So firmware that arms the watchdog early can be recovered with no hardware change. If it hangs, the chip reboots through the ROM, and a transporter that is already keying catches it. Only the loader's watchdog was tested; a CFW's own P33 WDT should behave the same, because every reset starts in ROM.
+
+A truly bricked unit (no watchdog, hung) still needs one power-on while the transporter keys.

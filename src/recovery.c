@@ -273,6 +273,20 @@ void recovery_run(void) {
     }
 }
 
+bool recovery_wait_detached(uint32_t timeout_ms) {
+    uint64_t deadline = time_us_64() + (uint64_t)timeout_ms * 1000;
+    int lows = 0;
+    while (time_us_64() < deadline) {
+        if (!dp()) {
+            if (++lows >= 20) return true;     // 2 ms steadily low
+        } else {
+            lows = 0;
+        }
+        sleep_us(100);
+    }
+    return false;
+}
+
 bool recovery_target_attached(void) {
     for (int i = 0; i < 50; i++) {
         if (!dp()) return false;

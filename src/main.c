@@ -55,7 +55,12 @@ static void core1_main(void) {
     bool force_key = watchdog_hw->scratch[0] == REKEY_MAGIC;
     watchdog_hw->scratch[0] = 0;
     if (force_key) {
-        dlog("REKEY: USB_KEY forced; power-cycle the FM-1 now");
+        // A loader or UBOOT may still hold D+ for a moment after we stop
+        // talking to it; keying into that would mistake it for a fresh ROM.
+        dlog("REKEY: waiting for D+ to drop (loader watchdog / power-off)");
+        bool dropped = recovery_wait_detached(15000);
+        dlog("REKEY: %s; USB_KEY forced now",
+             dropped ? "D+ dropped" : "D+ still high after 15 s - power-cycle the FM-1");
         recovery_run();
     } else if (recovery_target_attached()) {
         dlog("D+ already pulled up (FM-1 app or a waiting UBOOT) - skipping USB_KEY");

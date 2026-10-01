@@ -14,6 +14,9 @@ void recovery_init(void);
 // or a ROM UBOOT left waiting. The key is pointless then; go straight to host.
 bool recovery_target_attached(void);
 
+// Waits until nothing pulls D+ up (e.g. the loader's watchdog reset fired).
+bool recovery_wait_detached(uint32_t timeout_ms);
+
 // Feeds the 1 ms pulses for ms without keying, then returns with them still
 // running. Stock V15 also failed its first SETUP without them; with 6 s of
 // pulses before the host started it enumerated every time.
