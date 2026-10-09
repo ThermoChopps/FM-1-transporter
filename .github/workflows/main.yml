@@ -1,6 +1,7 @@
 name: Build FM-1 Transporter UF2
 
 on:
+  push:
   workflow_dispatch:
 
 jobs:
@@ -21,16 +22,17 @@ jobs:
       - name: Clone Pico SDK
         run: |
           git clone --recurse-submodules https://github.com/raspberrypi/pico-sdk.git $HOME/pico-sdk
+
       - name: Download wl82loader.bin
         run: |
           git clone https://github.com/kagaimiq/jl-uboot-tool.git /tmp/jl-uboot-tool
           LOADER_PATH=$(find /tmp/jl-uboot-tool -name "wl82loader.bin" | head -n 1)
           if [ -z "$LOADER_PATH" ]; then
-            echo "ERROR: wl82loader.bin not found!"
+            echo "ERROR: wl82loader.bin not found in jl-uboot-tool repository!"
             exit 1
           fi
           cp "$LOADER_PATH" "${{ github.workspace }}/wl82loader.bin"
-          echo "Found loader at $LOADER_PATH"
+          echo "Found loader at $LOADER_PATH and copied to workspace."
 
       - name: Build UF2 for XIAO RP2040
         run: |
