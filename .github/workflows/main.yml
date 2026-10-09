@@ -1,0 +1,41 @@
+name: Build FM-1 Transporter UF2
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout FM-1 Transporter
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install ARM GCC Toolchain & CMake
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake gcc-arm-none-eabi libnewlib-arm-none-eabi build-essential
+
+      - name: Clone Pico SDK
+        run: |
+          git clone --recurse-submodules https://github.com/raspberrypi/pico-sdk.git $HOME/pico-sdk
+
+      - name: Download wl82loader.bin
+        run: |
+          git clone https://github.com/kagaimiq/jl-uboot-tool.git /tmp/jl-uboot-tool
+
+      - name: Build UF2 for Raspberry Pi Pico
+        run: |
+          cmake -S . -B build \
+            -DPICO_SDK_PATH=$HOME/pico-sdk \
+            -DPICO_BOARD=pico \
+            -DFM1T_LOADER_BIN=/tmp/jl-uboot-tool/wl82loader.bin
+          cmake --build build -j$(nproc)
+
+      - name: Upload UF2 Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fm1-transporter-pico-uf2
+          path: build/*.uf2
