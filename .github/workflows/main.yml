@@ -21,21 +21,27 @@ jobs:
       - name: Clone Pico SDK
         run: |
           git clone --recurse-submodules https://github.com/raspberrypi/pico-sdk.git $HOME/pico-sdk
-
       - name: Download wl82loader.bin
         run: |
           git clone https://github.com/kagaimiq/jl-uboot-tool.git /tmp/jl-uboot-tool
+          LOADER_PATH=$(find /tmp/jl-uboot-tool -name "wl82loader.bin" | head -n 1)
+          if [ -z "$LOADER_PATH" ]; then
+            echo "ERROR: wl82loader.bin not found!"
+            exit 1
+          fi
+          cp "$LOADER_PATH" "${{ github.workspace }}/wl82loader.bin"
+          echo "Found loader at $LOADER_PATH"
 
-      - name: Build UF2 for Raspberry Pi Pico
+      - name: Build UF2 for XIAO RP2040
         run: |
           cmake -S . -B build \
             -DPICO_SDK_PATH=$HOME/pico-sdk \
-            -DPICO_BOARD=pico \
-            -DFM1T_LOADER_BIN=/tmp/jl-uboot-tool/wl82loader.bin
+            -DPICO_BOARD=seeed_xiao_rp2040 \
+            -DFM1T_LOADER_BIN="${{ github.workspace }}/wl82loader.bin"
           cmake --build build -j$(nproc)
 
       - name: Upload UF2 Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: fm1-transporter-pico-uf2
+          name: fm1-transporter-xiao-uf2
           path: build/*.uf2
